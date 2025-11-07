@@ -3,9 +3,14 @@ package org.scriptonbasestar.cache.collection.map;
 import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
-import sun.reflect.generics.reflectiveObjects.NotImplementedException;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * @author archmagece
@@ -35,25 +40,146 @@ import java.util.*;
  * 	TODO forced timeout 기능이 있어야함. 자주 조회하더라도 일정시간 지나면 무조건 폐기할 필요 있음.
  */
 @Slf4j
-public class SBCacheMap<K, V> {
+public class SBCacheMap<K, V> implements AutoCloseable {
 
-	private Random random = new Random(System.currentTimeMillis());
-	private Map<K, Long> timeoutChecker;
-	private Map<K, V> data;
+	private final ConcurrentHashMap<K, Long> timeoutChecker;
+	private final ConcurrentHashMap<K, V> data;
 	private final int timeoutSec;
 	private final SBCacheMapLoader<K, V> cacheLoader;
+	private final Object lock = new Object();
+	private final ScheduledExecutorService cleanupExecutor;
+	private final AtomicBoolean closed = new AtomicBoolean(false);
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
-		timeoutChecker = Collections.synchronizedMap(new HashMap<K, Long>());
-		data = Collections.synchronizedMap(new HashMap<K, V>());
+		this(cacheLoader, timeoutSec, false, 5);
+	}
 
+	/**
+	 * 자동 정리 기능을 설정할 수 있는 생성자
+	 *
+	 * @param cacheLoader 캐시 로더
+	 * @param timeoutSec 타임아웃 시간(초)
+	 * @param enableAutoCleanup 자동 정리 활성화 여부
+	 * @param cleanupIntervalMinutes 정리 주기(분)
+	 */
+	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
+					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
+		this.timeoutChecker = new ConcurrentHashMap<>();
+		this.data = new ConcurrentHashMap<>();
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
+
+		if (enableAutoCleanup) {
+			this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+				Thread t = new Thread(r, "SBCacheMap-Cleanup");
+				t.setDaemon(true);
+				return t;
+			});
+			this.cleanupExecutor.scheduleAtFixedRate(
+				this::removeExpired,
+				cleanupIntervalMinutes,
+				cleanupIntervalMinutes,
+				TimeUnit.MINUTES
+			);
+			log.debug("Auto cleanup enabled with interval: {} minutes", cleanupIntervalMinutes);
+		} else {
+			this.cleanupExecutor = null;
+		}
+	}
+
+	/**
+	 * 람다 함수를 사용하여 간단하게 캐시 맵을 생성합니다.
+	 * loadAll은 기본 구현(빈 맵 반환)을 사용합니다.
+	 *
+	 * @param loadOneFunction 단일 키 로드 함수
+	 * @param timeoutSec 타임아웃 시간(초)
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 * @return 생성된 SBCacheMap 인스턴스
+	 */
+	public static <K, V> SBCacheMap<K, V> create(
+			LoadOneFunction<K, V> loadOneFunction,
+			int timeoutSec) {
+		SBCacheMapLoader<K, V> loader = new SBCacheMapLoader<K, V>() {
+			@Override
+			public V loadOne(K key) throws SBCacheLoadFailException {
+				try {
+					return loadOneFunction.load(key);
+				} catch (Exception e) {
+					throw new SBCacheLoadFailException(e);
+				}
+			}
+		};
+		return new SBCacheMap<>(loader, timeoutSec);
+	}
+
+	/**
+	 * 람다 함수를 사용하는 단순화된 로더 인터페이스
+	 *
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 */
+	@FunctionalInterface
+	public interface LoadOneFunction<K, V> {
+		V load(K key) throws Exception;
+	}
+
+	/**
+	 * Builder 패턴을 사용하여 SBCacheMap을 생성합니다.
+	 *
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 * @return Builder 인스턴스
+	 */
+	public static <K, V> Builder<K, V> builder() {
+		return new Builder<>();
+	}
+
+	/**
+	 * SBCacheMap Builder 클래스
+	 *
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 */
+	public static class Builder<K, V> {
+		private SBCacheMapLoader<K, V> loader;
+		private int timeoutSec = 60; // 기본값 60초
+		private boolean enableAutoCleanup = false;
+		private int cleanupIntervalMinutes = 5; // 기본값 5분
+
+		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
+			this.loader = loader;
+			return this;
+		}
+
+		public Builder<K, V> timeoutSec(int timeoutSec) {
+			this.timeoutSec = timeoutSec;
+			return this;
+		}
+
+		public Builder<K, V> enableAutoCleanup(boolean enable) {
+			this.enableAutoCleanup = enable;
+			return this;
+		}
+
+		public Builder<K, V> cleanupIntervalMinutes(int minutes) {
+			this.cleanupIntervalMinutes = minutes;
+			return this;
+		}
+
+		public SBCacheMap<K, V> build() {
+			if (loader == null) {
+				throw new IllegalStateException("loader must be set");
+			}
+			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes);
+		}
 	}
 
 	public V put(K key, V val) {
 		log.trace("put data - key : {} , value : {}", key, val);
-		timeoutChecker.put(key, System.currentTimeMillis() + 1000 * Math.abs(random.nextInt() % timeoutSec));
+		// ThreadLocalRandom을 사용하여 0부터 timeoutSec까지의 jitter 추가 (cache stampede 방지)
+		long jitter = ThreadLocalRandom.current().nextLong(timeoutSec);
+		timeoutChecker.put(key, System.currentTimeMillis() + (timeoutSec + jitter) * 1000);
 		return data.put(key, val);
 	}
 
@@ -67,19 +193,19 @@ public class SBCacheMap<K, V> {
 
 	public V get(final K key) {
 		log.trace("get data - key : {}", key);
-		synchronized (SBCacheMap.class){
+		synchronized (lock){
 			if (data.containsKey(key) && timeoutChecker.containsKey(key) && TimeCheckerUtil.checkExpired(timeoutChecker.get(key), timeoutSec)){
 				return data.get(key);
 			}
 		}
 		try{
 			V val = cacheLoader.loadOne(key);
-			synchronized (SBCacheMap.class){
+			synchronized (lock){
 				put(key, val);
 				return data.get(key);
 			}
 		}catch (SBCacheLoadFailException e){
-			synchronized (SBCacheMap.class) {
+			synchronized (lock) {
 				data.remove(key);
 				timeoutChecker.remove(key);
 			}
@@ -91,17 +217,17 @@ public class SBCacheMap<K, V> {
 	 * 필요해보이면 구현예정
 	 */
 	public void getAll() {
-		throw new NotImplementedException();
+		throw new UnsupportedOperationException("getAll() not yet implemented");
 	}
 
 	public void postponeOne(K key) {
-		synchronized (SBCacheMap.class) {
+		synchronized (lock) {
 			timeoutChecker.put(key, System.currentTimeMillis() + 1000 * timeoutSec);
 		}
 	}
 
 	public void postponeAll() {
-		synchronized (SBCacheMap.class) {
+		synchronized (lock) {
 			for (K key : timeoutChecker.keySet()) {
 				postponeOne(key);
 			}
@@ -114,13 +240,13 @@ public class SBCacheMap<K, V> {
 	 * @param key
 	 */
 	public void expireOne(K key) {
-		synchronized (SBCacheMap.class) {
+		synchronized (lock) {
 			timeoutChecker.put(key, System.currentTimeMillis() + 1000 * 1);
 		}
 	}
 
 	public void expireAll() {
-		synchronized (SBCacheMap.class) {
+		synchronized (lock) {
 			for (K key : timeoutChecker.keySet()) {
 				expireOne(key);
 			}
@@ -128,7 +254,7 @@ public class SBCacheMap<K, V> {
 	}
 
 	public V remove(Object key) {
-		synchronized (SBCacheMap.class) {
+		synchronized (lock) {
 			timeoutChecker.remove(key);
 			return data.remove(key);
 		}
@@ -148,7 +274,7 @@ public class SBCacheMap<K, V> {
 	public void removeExpired() {
 		for(K key : timeoutChecker.keySet()){
 			if(TimeCheckerUtil.checkExpired(timeoutChecker.get(key), timeoutSec)){
-				synchronized (SBCacheMap.class) {
+				synchronized (lock) {
 					timeoutChecker.remove(key);
 					data.remove(key);
 				}
@@ -184,5 +310,30 @@ public class SBCacheMap<K, V> {
 	@Override
 	public String toString() {
 		return data.toString();
+	}
+
+	/**
+	 * 캐시 리소스를 정리합니다.
+	 * 자동 정리가 활성화된 경우 스케줄러를 종료합니다.
+	 * try-with-resources 또는 명시적 close() 호출 시 자동으로 실행됩니다.
+	 */
+	@Override
+	public void close() {
+		if (closed.compareAndSet(false, true)) {
+			if (cleanupExecutor != null) {
+				log.debug("Shutting down SBCacheMap cleanup executor");
+				cleanupExecutor.shutdown();
+				try {
+					if (!cleanupExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+						log.warn("Cleanup executor did not terminate in time, forcing shutdown");
+						cleanupExecutor.shutdownNow();
+					}
+				} catch (InterruptedException e) {
+					log.warn("Interrupted while waiting for cleanup executor termination", e);
+					cleanupExecutor.shutdownNow();
+					Thread.currentThread().interrupt();
+				}
+			}
+		}
 	}
 }

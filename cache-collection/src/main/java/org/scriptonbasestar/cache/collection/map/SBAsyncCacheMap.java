@@ -3,12 +3,12 @@ package org.scriptonbasestar.cache.collection.map;
 import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author archmagece
@@ -21,15 +21,14 @@ import java.util.concurrent.Executors;
  *
  */
 @Slf4j
-public class SBAsyncCacheMap<K, V> {
+public class SBAsyncCacheMap<K, V> implements AutoCloseable {
 
-	private Random random = new Random(System.currentTimeMillis());
-	private Map<K, Long> timeoutChecker;
-	private Map<K, V> data;
+	private final ConcurrentHashMap<K, Long> timeoutChecker;
+	private final ConcurrentHashMap<K, V> data;
 	private final int timeoutSec;
 	private final SBCacheMapLoader<K, V> cacheLoader;
 
-	private ExecutorService executor;
+	private final ExecutorService executor;
 	//async
 	private final int NUMBER_OF_THREAD = 5;
 
@@ -38,9 +37,8 @@ public class SBAsyncCacheMap<K, V> {
 
 
 	public SBAsyncCacheMap(SBCacheMapLoader cacheLoader, int timeoutSec) {
-		timeoutChecker = Collections.synchronizedMap(new HashMap<K, Long>());
-		data = Collections.synchronizedMap(new HashMap<K, V>());
-
+		this.timeoutChecker = new ConcurrentHashMap<>();
+		this.data = new ConcurrentHashMap<>();
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
 
@@ -51,7 +49,9 @@ public class SBAsyncCacheMap<K, V> {
 
 	public V put(K key, V val) {
 		log.trace("put data - key : {} , val : {}", key, val);
-		timeoutChecker.put(key, System.currentTimeMillis() + 1000 * Math.abs(random.nextInt() % timeoutSec));
+		// ThreadLocalRandom을 사용하여 0부터 timeoutSec까지의 jitter 추가 (cache stampede 방지)
+		long jitter = ThreadLocalRandom.current().nextLong(timeoutSec);
+		timeoutChecker.put(key, System.currentTimeMillis() + (timeoutSec + jitter) * 1000);
 		return data.put(key, val);
 	}
 
@@ -119,6 +119,29 @@ public class SBAsyncCacheMap<K, V> {
 //					timeCheckerExpire.remove(key);
 //				}
 			}
+		}
+	}
+
+	/**
+	 * ExecutorService를 graceful하게 종료합니다.
+	 * try-with-resources 또는 명시적 close() 호출 시 자동으로 실행됩니다.
+	 */
+	@Override
+	public void close() {
+		log.debug("Shutting down SBAsyncCacheMap executor");
+		executor.shutdown();
+		try {
+			if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+				log.warn("Executor did not terminate in time, forcing shutdown");
+				executor.shutdownNow();
+				if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+					log.error("Executor did not terminate after forced shutdown");
+				}
+			}
+		} catch (InterruptedException e) {
+			log.warn("Interrupted while waiting for executor termination", e);
+			executor.shutdownNow();
+			Thread.currentThread().interrupt();
 		}
 	}
 
