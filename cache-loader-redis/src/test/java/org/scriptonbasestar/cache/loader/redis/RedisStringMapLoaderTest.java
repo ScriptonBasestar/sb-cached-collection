@@ -47,7 +47,7 @@ public class RedisStringMapLoaderTest {
 	@Test
 	@Ignore("Requires Redis server running on localhost:6379")
 	public void testLoadAll() throws Exception {
-		var allData = loader.loadAll();
+		java.util.Map<String, String> allData = loader.loadAll();
 		assertTrue(allData.size() >= 2);
 		assertEquals("John Doe", allData.get("user1"));
 		assertEquals("Jane Smith", allData.get("user2"));

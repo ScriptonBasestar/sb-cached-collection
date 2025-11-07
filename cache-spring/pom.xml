@@ -9,7 +9,9 @@
 	</parent>
 	<modelVersion>4.0.0</modelVersion>
 
-	<artifactId>cache-loader-redis</artifactId>
+	<artifactId>cache-spring</artifactId>
+	<name>SB Cache - Spring Integration</name>
+	<description>Spring Framework integration for SB Cache (CacheManager, @Cacheable support)</description>
 
 	<dependencies>
 		<!-- this project -->
@@ -20,21 +22,28 @@
 		<dependency>
 			<groupId>org.scriptonbasestar.cache</groupId>
 			<artifactId>cache-collection</artifactId>
+		</dependency>
+
+		<!-- Spring Context (for Cache abstraction) -->
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-context</artifactId>
+			<version>${org.springframework-version}</version>
+		</dependency>
+
+		<!-- Spring Context Support (CacheManager interface) -->
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-context-support</artifactId>
+			<version>${org.springframework-version}</version>
+		</dependency>
+
+		<!-- Spring Test (for testing) -->
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-test</artifactId>
+			<version>${org.springframework-version}</version>
 			<scope>test</scope>
-		</dependency>
-
-		<!-- Redis Client - Jedis -->
-		<dependency>
-			<groupId>redis.clients</groupId>
-			<artifactId>jedis</artifactId>
-			<version>5.1.0</version>
-		</dependency>
-
-		<!-- Apache Commons Pool (Jedis 연결 풀링) -->
-		<dependency>
-			<groupId>org.apache.commons</groupId>
-			<artifactId>commons-pool2</artifactId>
-			<version>2.12.0</version>
 		</dependency>
 	</dependencies>
 </project>

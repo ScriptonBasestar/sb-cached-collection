@@ -53,6 +53,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final ConcurrentHashMap<K, Long> absoluteExpiry;  // 절대 만료 시간 (forced timeout)
 	private final ConcurrentHashMap<K, V> data;
 	private final LinkedHashMap<K, Long> insertionOrder;  // LRU를 위한 삽입 순서 (maxSize > 0일 때만 사용)
+	private final Set<K> refreshingKeys;  // 현재 백그라운드 갱신 중인 키들 (ASYNC 전용)
 	private final int timeoutSec;
 	private final SBCacheMapLoader<K, V> cacheLoader;
 	private final Object lock = new Object();
@@ -100,6 +101,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
+		this.refreshingKeys = ConcurrentHashMap.newKeySet();  // Thread-safe set for tracking background refreshes
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
 		this.forcedTimeoutSec = forcedTimeoutSec;
@@ -309,9 +311,9 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 		long now = System.currentTimeMillis();
 
-		// 접근 기반 TTL (jitter 포함)
+		// 접근 기반 TTL (jitter 포함 - 최대 10%)
 		long baseTimeoutMs = customTtlSec * 1000L;
-		long jitterMs = ThreadLocalRandom.current().nextLong(customTtlSec * 1000L);
+		long jitterMs = ThreadLocalRandom.current().nextLong(Math.max(1, baseTimeoutMs / 10));
 		timeoutChecker.put(key, now + baseTimeoutMs + jitterMs);
 
 		// 절대 만료 시간 설정 (forced timeout)
@@ -370,6 +372,41 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		data.putAll(m);
 	}
 
+	/**
+	 * 캐시에서 값을 조회합니다. 값이 없으면 로더를 통해 로드하지 않고 null을 반환합니다.
+	 * Spring Cache 통합 등에서 사용됩니다.
+	 *
+	 * @param key 조회할 키
+	 * @return 캐시된 값, 없거나 만료된 경우 null
+	 */
+	public V getIfPresent(K key) {
+		V cachedValue = data.get(key);
+		Long timestamp = timeoutChecker.get(key);
+		Long absoluteExpiration = absoluteExpiry.get(key);
+
+		// 절대 만료 시간 확인
+		if (forcedTimeoutSec > 0 && absoluteExpiration != null) {
+			if (System.currentTimeMillis() > absoluteExpiration) {
+				return null;
+			}
+		}
+
+		// 접근 기반 TTL 확인
+		if (cachedValue != null && timestamp != null && System.currentTimeMillis() < timestamp) {
+			// 캐시 히트
+			if (metrics != null) {
+				metrics.recordHit();
+			}
+			return cachedValue;
+		}
+
+		// 캐시 미스 또는 만료
+		if (metrics != null) {
+			metrics.recordMiss();
+		}
+		return null;
+	}
+
 	public V get(final K key) {
 		log.trace("get data - key : {}", key);
 
@@ -388,8 +425,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			}
 		}
 
-		// 접근 기반 TTL 확인
-		if (cachedValue != null && timestamp != null && TimeCheckerUtil.checkExpired(timestamp, timeoutSec)) {
+		// 접근 기반 TTL 확인 (timestamp는 만료 시간을 저장)
+		if (cachedValue != null && timestamp != null && System.currentTimeMillis() < timestamp) {
 			// 캐시 히트
 			if (metrics != null) {
 				metrics.recordHit();
@@ -412,28 +449,36 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		if (loadStrategy == LoadStrategy.ASYNC && cachedValue != null) {
 			log.trace("ASYNC strategy: returning stale data for key: {} and triggering background refresh", key);
 
-			// 백그라운드에서 비동기 로드
-			asyncExecutor.submit(() -> {
-				try {
-					log.trace("Background refresh started for key: {}", key);
-					long loadStartTime = System.nanoTime();
-					V val = cacheLoader.loadOne(key);
-					put(key, val);
+			// 이미 갱신 중이 아닌 경우에만 백그라운드 갱신 시작
+			if (refreshingKeys.add(key)) {
+				// 백그라운드에서 비동기 로드
+				asyncExecutor.submit(() -> {
+					try {
+						log.trace("Background refresh started for key: {}", key);
+						long loadStartTime = System.nanoTime();
+						V val = cacheLoader.loadOne(key);
+						put(key, val);
 
-					// 로드 성공 메트릭
-					if (metrics != null) {
-						long loadTime = System.nanoTime() - loadStartTime;
-						metrics.recordLoadSuccess(loadTime);
+						// 로드 성공 메트릭
+						if (metrics != null) {
+							long loadTime = System.nanoTime() - loadStartTime;
+							metrics.recordLoadSuccess(loadTime);
+						}
+						log.trace("Background refresh completed for key: {}", key);
+					} catch (SBCacheLoadFailException e) {
+						log.warn("Background refresh failed for key: {}", key, e);
+						// 로드 실패 메트릭
+						if (metrics != null) {
+							metrics.recordLoadFailure();
+						}
+					} finally {
+						// 갱신 완료 후 키 제거
+						refreshingKeys.remove(key);
 					}
-					log.trace("Background refresh completed for key: {}", key);
-				} catch (SBCacheLoadFailException e) {
-					log.warn("Background refresh failed for key: {}", key, e);
-					// 로드 실패 메트릭
-					if (metrics != null) {
-						metrics.recordLoadFailure();
-					}
-				}
-			});
+				});
+			} else {
+				log.trace("Background refresh already in progress for key: {}", key);
+			}
 
 			// 만료된 데이터를 즉시 반환
 			return cachedValue;
@@ -454,8 +499,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 				}
 			}
 
-			// 접근 기반 TTL 재확인
-			if (cachedValue != null && timestamp != null && TimeCheckerUtil.checkExpired(timestamp, timeoutSec)) {
+			// 접근 기반 TTL 재확인 (timestamp는 만료 시간을 저장)
+			if (cachedValue != null && timestamp != null && System.currentTimeMillis() < timestamp) {
 				return cachedValue;
 			}
 
@@ -538,12 +583,16 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 	}
 
-//	public void removeAll() {
-//		synchronized (SBCacheMap.class) {
-//			timeoutChecker.clear();
-//			data.clear();
-//		}
-//	}
+	/**
+	 * 모든 캐시 항목을 제거합니다.
+	 */
+	public void removeAll() {
+		synchronized (lock) {
+			timeoutChecker.clear();
+			absoluteExpiry.clear();
+			data.clear();
+		}
+	}
 
 	/**
 	 * 만료된 항목들을 제거합니다.

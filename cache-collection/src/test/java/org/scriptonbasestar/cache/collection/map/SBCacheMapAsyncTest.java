@@ -318,7 +318,7 @@ public class SBCacheMapAsyncTest {
 
 			// 백그라운드 로드 완료 대기
 			Thread.sleep(500);
-			assertEquals(1, cache.metrics().loadSuccessCount());
+			assertEquals(2, cache.metrics().loadSuccessCount());  // 초기 로드(1) + 백그라운드 갱신(1) = 2
 
 			// 새 데이터 조회: 히트
 			cache.get("key1");
