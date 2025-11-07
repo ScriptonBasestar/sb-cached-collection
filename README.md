@@ -192,6 +192,38 @@ String product = cache.get("product123");
 loader.delete("product123");
 ```
 
+#### 2단 캐싱 (메모리 + Redis)
+
+여러 서버 환경에서 로컬 메모리와 Redis를 함께 사용하여 최적의 성능을 얻을 수 있습니다.
+
+```java
+// L2: Redis 캐시 (1시간 TTL)
+JedisPooled jedis = new JedisPooled("localhost", 6379);
+RedisSerializedMapLoader<Long, User> redisLoader =
+    new RedisSerializedMapLoader<>(jedis, "users:");
+SBCacheMap<Long, User> l2Cache = new SBCacheMap<>(redisLoader, 3600);
+
+// L1: 메모리 캐시 (1분 TTL) → L2로 체이닝
+ChainedCacheMapLoader<Long, User> chainedLoader = new ChainedCacheMapLoader<>(l2Cache);
+SBCacheMap<Long, User> l1Cache = new SBCacheMap<>(chainedLoader, 60);
+
+// 사용
+User user = l1Cache.get(123L);
+// 1. L1(메모리) 확인 (60초 TTL)
+// 2. L1 미스 → L2(메모리) 확인 (3600초 TTL)
+// 3. L2 미스 → Redis 조회
+```
+
+**데이터 흐름:**
+```
+App → L1(Memory 60s) → L2(Memory 3600s) → Redis
+```
+
+**장점:**
+- 초고속: 대부분의 요청이 L1에서 처리 (나노초 단위)
+- 효율적: Redis 조회 횟수 최소화 (분당 1회 이하)
+- 유연함: 각 레벨의 TTL 독립 설정
+
 ## 빌드 방법
 
 ```bash
@@ -237,6 +269,7 @@ mvn test
 - ✅ **RedisSerializedMapLoader**: 객체 직렬화 지원 범용 로더
 - ✅ **Write-Through 패턴**: save(), delete() 메서드로 캐시-Redis 동시 업데이트
 - ✅ **AutoCloseable 지원**: try-with-resources로 안전한 리소스 관리
+- ✅ **ChainedCacheMapLoader**: 2단/3단 캐싱 지원 (메모리 → Redis 체이닝)
 - ✅ **cache-loader-inmemory 제거**: 불필요한 모듈 정리
 
 ## 현재 상태
