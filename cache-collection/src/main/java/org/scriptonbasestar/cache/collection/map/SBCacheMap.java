@@ -2,15 +2,12 @@ package org.scriptonbasestar.cache.collection.map;
 
 import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
+import org.scriptonbasestar.cache.collection.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -57,14 +54,16 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final SBCacheMapLoader<K, V> cacheLoader;
 	private final Object lock = new Object();
 	private final Object lruLock = new Object();  // LRU 작업용 별도 락
-	private final ScheduledExecutorService cleanupExecutor;
+	private final ScheduledExecutorService cleanupExecutor;  // 자동 정리용
+	private final ExecutorService asyncExecutor;  // 비동기 로드용 (LoadStrategy.ASYNC일 때 사용)
 	private final AtomicBoolean closed = new AtomicBoolean(false);
 	private final int forcedTimeoutSec;  // 절대 만료 시간 (0이면 비활성화)
 	private final int maxSize;  // 최대 캐시 크기 (0이면 무제한)
 	private final CacheMetrics metrics;  // 통계 (null이면 비활성화)
+	private final LoadStrategy loadStrategy;  // 로드 전략 (SYNC 또는 ASYNC)
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
-		this(cacheLoader, timeoutSec, false, 5, 0, 0, false);
+		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC);
 	}
 
 	/**
@@ -77,7 +76,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 */
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
-		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false);
+		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC);
 	}
 
 	/**
@@ -90,10 +89,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param forcedTimeoutSec 절대 만료 시간(초) - 0이면 비활성화
 	 * @param maxSize 최대 캐시 크기 - 0이면 무제한
 	 * @param enableMetrics 통계 수집 활성화 여부
+	 * @param loadStrategy 로드 전략 (SYNC 또는 ASYNC)
 	 */
 	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
-					  int forcedTimeoutSec, int maxSize, boolean enableMetrics) {
+					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
@@ -102,6 +102,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.forcedTimeoutSec = forcedTimeoutSec;
 		this.maxSize = maxSize;
 		this.metrics = enableMetrics ? new CacheMetrics() : null;
+		this.loadStrategy = loadStrategy != null ? loadStrategy : LoadStrategy.SYNC;
 		this.insertionOrder = maxSize > 0 ? new LinkedHashMap<K, Long>(16, 0.75f, true) {
 			@Override
 			protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
@@ -109,6 +110,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			}
 		} : null;
 
+		// 자동 정리용 ExecutorService
 		if (enableAutoCleanup) {
 			this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
 				Thread t = new Thread(r, "SBCacheMap-Cleanup");
@@ -124,6 +126,18 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			log.debug("Auto cleanup enabled with interval: {} minutes", cleanupIntervalMinutes);
 		} else {
 			this.cleanupExecutor = null;
+		}
+
+		// 비동기 로드용 ExecutorService (LoadStrategy.ASYNC일 때만 생성)
+		if (this.loadStrategy == LoadStrategy.ASYNC) {
+			this.asyncExecutor = Executors.newFixedThreadPool(5, r -> {
+				Thread t = new Thread(r, "SBCacheMap-AsyncLoader");
+				t.setDaemon(true);
+				return t;
+			});
+			log.debug("Async load strategy enabled with {} threads", 5);
+		} else {
+			this.asyncExecutor = null;
 		}
 	}
 
@@ -189,6 +203,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private int forcedTimeoutSec = 0; // 기본값: 비활성화
 		private int maxSize = 0; // 기본값: 무제한
 		private boolean enableMetrics = false; // 기본값: 비활성화
+		private LoadStrategy loadStrategy = LoadStrategy.SYNC; // 기본값: 동기
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -246,12 +261,26 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 로드 전략을 설정합니다.
+		 *
+		 * <p>SYNC (기본값): 캐시 미스 시 즉시 로드하고 대기 (블로킹)</p>
+		 * <p>ASYNC: 캐시 미스 시 이전 데이터 반환 + 백그라운드 갱신 (SBAsyncCacheMap 동작)</p>
+		 *
+		 * @param strategy 로드 전략 (SYNC 또는 ASYNC)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> loadStrategy(LoadStrategy strategy) {
+			this.loadStrategy = strategy;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
 			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
-				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics);
+				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy);
 		}
 	}
 
@@ -374,6 +403,37 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		// 캐시 미스
 		if (metrics != null) {
 			metrics.recordMiss();
+		}
+
+		// ASYNC 전략: 만료된 데이터가 있으면 즉시 반환 + 백그라운드 갱신
+		if (loadStrategy == LoadStrategy.ASYNC && cachedValue != null) {
+			log.trace("ASYNC strategy: returning stale data for key: {} and triggering background refresh", key);
+
+			// 백그라운드에서 비동기 로드
+			asyncExecutor.submit(() -> {
+				try {
+					log.trace("Background refresh started for key: {}", key);
+					long loadStartTime = System.nanoTime();
+					V val = cacheLoader.loadOne(key);
+					put(key, val);
+
+					// 로드 성공 메트릭
+					if (metrics != null) {
+						long loadTime = System.nanoTime() - loadStartTime;
+						metrics.recordLoadSuccess(loadTime);
+					}
+					log.trace("Background refresh completed for key: {}", key);
+				} catch (SBCacheLoadFailException e) {
+					log.warn("Background refresh failed for key: {}", key, e);
+					// 로드 실패 메트릭
+					if (metrics != null) {
+						metrics.recordLoadFailure();
+					}
+				}
+			});
+
+			// 만료된 데이터를 즉시 반환
+			return cachedValue;
 		}
 
 		// 2. 캐시 미스 또는 만료 - 데이터 로드 (동기화 필요)
@@ -613,6 +673,20 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 				} catch (InterruptedException e) {
 					log.warn("Interrupted while waiting for cleanup executor termination", e);
 					cleanupExecutor.shutdownNow();
+					Thread.currentThread().interrupt();
+				}
+			}
+			if (asyncExecutor != null) {
+				log.debug("Shutting down SBCacheMap async loader executor");
+				asyncExecutor.shutdown();
+				try {
+					if (!asyncExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+						log.warn("Async loader executor did not terminate in time, forcing shutdown");
+						asyncExecutor.shutdownNow();
+					}
+				} catch (InterruptedException e) {
+					log.warn("Interrupted while waiting for async loader executor termination", e);
+					asyncExecutor.shutdownNow();
 					Thread.currentThread().interrupt();
 				}
 			}

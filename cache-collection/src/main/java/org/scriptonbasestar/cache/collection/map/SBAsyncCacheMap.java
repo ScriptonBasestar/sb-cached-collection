@@ -11,16 +11,36 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
+ * 비동기 캐시 Map 구현체
+ *
+ * <p><strong>⚠️ Deprecated:</strong> 이 클래스는 더 이상 권장되지 않습니다.
+ * {@link SBCacheMap}에 {@link org.scriptonbasestar.cache.collection.strategy.LoadStrategy#ASYNC}를 사용하세요.</p>
+ *
+ * <h3>마이그레이션 가이드:</h3>
+ * <pre>{@code
+ * // Before (Deprecated)
+ * SBAsyncCacheMap<String, Data> cache = SBAsyncCacheMap.<String, Data>builder()
+ *     .loader(key -> loadData(key))
+ *     .timeoutSec(300)
+ *     .numberOfThreads(10)
+ *     .build();
+ *
+ * // After (Recommended)
+ * SBCacheMap<String, Data> cache = SBCacheMap.<String, Data>builder()
+ *     .loader(key -> loadData(key))
+ *     .timeoutSec(300)
+ *     .loadStrategy(LoadStrategy.ASYNC)  // ASYNC 전략 사용
+ *     .build();
+ * }</pre>
+ *
+ * <p>ASYNC 전략은 캐시 미스 시 만료된 데이터를 즉시 반환하고 백그라운드에서 새 데이터를 로드합니다.</p>
+ *
  * @author archmagece
- * @with sb-tools-java
- * @since 2015-08-26 11
- *
- * 들만들어짐
- *
- * ConcurrentMap 참고.
- *
+ * @since 2015-08-26
+ * @deprecated SBCacheMap with LoadStrategy.ASYNC를 사용하세요
  */
 @Slf4j
+@Deprecated(since = "2.0.0", forRemoval = true)
 public class SBAsyncCacheMap<K, V> implements AutoCloseable {
 
 	private final ConcurrentHashMap<K, Long> timeoutChecker;

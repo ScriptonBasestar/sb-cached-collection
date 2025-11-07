@@ -73,7 +73,9 @@ Thread.sleep(61000);
 User refreshedUser = cacheMap.get(1L);  // 61초 후: 다시 DB 조회
 ```
 
-### SBCacheList 사용
+### SBCacheList 사용 (리스트 전체 캐싱)
+
+#### 기본 사용
 
 ```java
 SBCacheListLoader<Product> loader = new SBCacheListLoader<Product>() {
@@ -81,10 +83,62 @@ SBCacheListLoader<Product> loader = new SBCacheListLoader<Product>() {
     public List<Product> loadAll() {
         return productRepository.findAllActive();
     }
+
+    @Override
+    public Product loadOne(int index) {
+        return productRepository.findByIndex(index);
+    }
 };
 
-SBCacheList<Product> cacheList = new SBCacheList<>(loader, 300);  // 5분 TTL
-List<Product> products = cacheList.getList();
+// 기본 생성자 (5분 TTL)
+try (SBCacheList<Product> cacheList = new SBCacheList<>(loader, 300)) {
+    List<Product> products = cacheList.getList();
+} // 자동으로 리소스 정리
+```
+
+#### Builder 패턴 (권장)
+
+```java
+try (SBCacheList<Product> cacheList = SBCacheList.<Product>builder()
+        .loader(loader)
+        .timeoutSec(300)                  // 접근 기반 TTL (5분)
+        .forcedTimeoutSec(3600)           // 절대 만료 시간 (1시간)
+        .maxSize(1000)                    // 최대 1000개 (초과 시 경고)
+        .enableMetrics(true)              // 통계 수집
+        .enableAutoCleanup(true)          // 자동 정리
+        .cleanupIntervalMinutes(10)       // 10분마다 확인
+        .loadStrategy(LoadStrategy.ALL)   // 비동기 갱신 (기본값)
+        .build()) {
+
+    List<Product> products = cacheList.getList();
+
+    // 통계 확인
+    CacheMetrics metrics = cacheList.metrics();
+    System.out.println("Hit rate: " + metrics.hitRate() * 100 + "%");
+
+    // 수동 갱신
+    cacheList.refresh();
+}
+```
+
+#### LoadStrategy 선택
+
+```java
+// LoadStrategy.ALL (기본값): 백그라운드 비동기 갱신
+SBCacheList<Product> asyncList = SBCacheList.<Product>builder()
+    .loader(loader)
+    .timeoutSec(300)
+    .loadStrategy(LoadStrategy.ALL)  // 만료 시 전체 리스트를 백그라운드에서 갱신
+    .build();
+
+// LoadStrategy.ONE: 동기 갱신 (특정 인덱스만 갱신)
+SBCacheList<Product> syncList = SBCacheList.<Product>builder()
+    .loader(loader)
+    .timeoutSec(300)
+    .loadStrategy(LoadStrategy.ONE)  // 만료 시 해당 인덱스만 즉시 갱신
+    .build();
+
+Product product = syncList.get(0);  // 만료 시 loader.loadOne(0) 호출
 ```
 
 ### 비동기 캐시 맵 (이전 데이터 반환 + 백그라운드 갱신)
@@ -157,6 +211,53 @@ cache.warmUp(importantUserIds);
 // 이제 첫 요청도 빠름 (이미 캐시됨)
 User user = cache.get(1L);  // 즉시 반환
 ```
+
+### LoadStrategy 선택 (SYNC vs ASYNC)
+
+SBCacheMap은 두 가지 로딩 전략을 지원합니다.
+
+#### SYNC (기본값): 동기 로딩
+
+```java
+// 명시적으로 SYNC 지정 (기본값이므로 생략 가능)
+SBCacheMap<Long, User> syncCache = SBCacheMap.<Long, User>builder()
+    .loader(key -> userRepository.findById(key))
+    .timeoutSec(300)
+    .loadStrategy(LoadStrategy.SYNC)  // 생략 가능
+    .build();
+
+// 캐시 미스 시: 블로킹하여 데이터 로드 후 반환
+User user = syncCache.get(1L);  // DB 조회 완료까지 대기
+```
+
+#### ASYNC: 비동기 로딩 (응답 속도 우선)
+
+```java
+// ASYNC 전략 사용
+SBCacheMap<Long, User> asyncCache = SBCacheMap.<Long, User>builder()
+    .loader(key -> userRepository.findById(key))
+    .timeoutSec(300)
+    .loadStrategy(LoadStrategy.ASYNC)  // 비동기 전략
+    .build();
+
+// 첫 조회: SYNC처럼 동작 (데이터가 없으므로)
+User user1 = asyncCache.get(1L);  // 블로킹
+
+// 5분 후 (TTL 만료)
+// ASYNC 동작: 만료된 데이터를 즉시 반환 + 백그라운드에서 갱신
+User user2 = asyncCache.get(1L);  // 즉시 반환 (stale data)
+// 백그라운드에서 새 데이터 로드 중...
+
+// 잠시 후 다시 조회하면 새 데이터 반환
+Thread.sleep(500);
+User user3 = asyncCache.get(1L);  // 갱신된 최신 데이터
+```
+
+**사용 사례 비교:**
+- **SYNC**: 데이터 정확성이 중요한 경우 (금융 거래, 재고 관리)
+- **ASYNC**: 응답 속도가 중요한 경우 (사용자 프로필, 통계 대시보드)
+
+**참고:** `SBAsyncCacheMap`은 `@Deprecated` 되었으며, `SBCacheMap`에 `LoadStrategy.ASYNC`를 사용하세요.
 
 ### 새로운 방식: 람다 표현식 (가장 간단)
 
@@ -329,12 +430,65 @@ mvn test
 - ✅ **getAll() 구현**: SBCacheMap에 현재 캐시 전체 조회 기능 추가
 - ✅ **SBAsyncCacheMap Builder 패턴**: 설정 가능한 스레드 풀 크기 지원
 
-### Phase 6: 핵심 유용성 개선 (2025-01)
+### Phase 6: 핵심 유용성 개선 - SBCacheMap (2025-01)
 - ✅ **CacheMetrics 클래스**: 히트율, 미스율, 평균 로드 시간 등 통계 수집
 - ✅ **최대 크기 제한 (maxSize)**: LRU 방식으로 오래된 항목 자동 제거, OOM 방지
 - ✅ **항목별 TTL 설정**: put(key, value, customTtlSec)로 항목마다 다른 만료 시간 설정
 - ✅ **캐시 워밍업**: warmUp() / warmUp(keys) 메서드로 초기 지연 방지
 - ✅ **Builder 확장**: maxSize, enableMetrics 옵션 추가
+
+### Phase 7: SBCacheList 전면 개선 (2025-01)
+- ✅ **Phase 1-3 현대화**: 클래스 레벨 동기화 제거, AutoCloseable 구현, Builder 패턴 추가
+- ✅ **CopyOnWriteArrayList 사용**: 동시성 안전한 리스트 구현으로 변경
+- ✅ **Phase 6 기능 추가**: CacheMetrics, forcedTimeout, maxSize (경고), autoCleanup
+- ✅ **LoadStrategy.ONE 구현 완성**: 개별 인덱스 갱신 기능 정상 동작
+- ✅ **getList() 메서드 추가**: 전체 리스트 조회용 메서드 (불변 뷰 반환)
+- ✅ **refresh() 메서드 추가**: 수동 갱신 기능
+- ✅ **AtomicLong 타임스탬프**: LocalTime 대신 밀리초 기반 정확한 만료 체크
+- ✅ **전용 테스트 파일**: SBCacheListPhase6Test.java (14개 테스트 메서드)
+
+### Phase 8: LoadStrategy 통합 및 SBAsyncCacheMap 통합 (2025-01)
+- ✅ **LoadStrategy enum 확장**: SYNC/ASYNC 전략 추가
+- ✅ **SBCacheMap에 ASYNC 전략 통합**: LoadStrategy.ASYNC로 비동기 로딩 지원
+- ✅ **SBAsyncCacheMap @Deprecated**: SBCacheMap으로 통합됨 (2.0.0에서 제거 예정)
+- ✅ **백그라운드 갱신**: 만료된 데이터를 즉시 반환하고 백그라운드에서 새 데이터 로드
+- ✅ **ExecutorService 관리**: ASYNC 전략 사용 시 자동으로 스레드 풀 생성 및 종료
+- ✅ **전용 테스트 파일**: SBCacheMapAsyncTest.java (8개 테스트 메서드)
+
+**마이그레이션 가이드:**
+```java
+// Before (Deprecated) - SBAsyncCacheMap 사용
+SBAsyncCacheMap<String, Data> cache = SBAsyncCacheMap.<String, Data>builder()
+    .loader(key -> loadData(key))
+    .timeoutSec(300)
+    .numberOfThreads(10)
+    .build();
+
+// After (Recommended) - SBCacheMap with LoadStrategy.ASYNC
+SBCacheMap<String, Data> cache = SBCacheMap.<String, Data>builder()
+    .loader(key -> loadData(key))
+    .timeoutSec(300)
+    .loadStrategy(LoadStrategy.ASYNC)  // ASYNC 전략 설정
+    .build();
+```
+
+**LoadStrategy 전략 비교:**
+- **SYNC (기본값)**: 캐시 미스 시 블로킹하여 즉시 데이터를 로드
+  - 사용 사례: 데이터 정확성이 중요한 경우
+  - 장점: 항상 최신 데이터 보장
+  - 단점: 로드 시간만큼 블로킹
+- **ASYNC**: 캐시 미스 시 만료된 데이터를 즉시 반환하고 백그라운드에서 갱신
+  - 사용 사례: 응답 속도가 중요한 경우
+  - 장점: 즉시 응답, 사용자 경험 향상
+  - 단점: 잠깐 오래된 데이터 반환 가능
+
+**주요 변경사항:**
+- `extends ArrayList<E>` → 독립적인 클래스 구조로 변경
+- `static Object syncObject` → 인스턴스별 동기화 객체로 변경
+- `LocalTime` → `AtomicLong` (밀리초 기반)으로 변경
+- 하드코딩된 TTL (300초) → 설정 가능하도록 변경
+- LoadStrategy.ONE 사용 시 `IndexOutOfBoundsException` 방지
+- 리소스 누수 방지 (ExecutorService 자동 종료)
 
 ## 현재 상태
 
