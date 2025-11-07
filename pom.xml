@@ -9,6 +9,7 @@
 		<module>cache-core</module>
 		<module>cache-collection</module>
 		<module>cache-loader-redis</module>
+		<module>cache-loader-jdbc</module>
 		<module>cache-spring</module>
 		<!--<module>cache-loader-file</module>-->
 	</modules>

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+		 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.scriptonbasestar.cache</groupId>
+		<artifactId>sb-cache-java</artifactId>
+		<version>sb-cache-20251107-1-DEV</version>
+	</parent>
+
+	<artifactId>cache-loader-jdbc</artifactId>
+
+	<dependencies>
+		<!-- this project -->
+		<dependency>
+			<groupId>org.scriptonbasestar.cache</groupId>
+			<artifactId>cache-core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.scriptonbasestar.cache</groupId>
+			<artifactId>cache-collection</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- JDBC -->
+		<!-- JDBC 드라이버는 사용자가 선택 (compile scope이 아닌 provided/runtime) -->
+
+		<!-- H2 Database (테스트용) -->
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
+			<version>2.2.224</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+</project>
