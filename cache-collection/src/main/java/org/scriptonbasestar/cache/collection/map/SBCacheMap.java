@@ -37,21 +37,26 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 			}
  * 		}, expireSecond);
  *
- * 	TODO forced timeout 기능이 있어야함. 자주 조회하더라도 일정시간 지나면 무조건 폐기할 필요 있음.
+ * 	Features:
+ * 	- Access-based TTL: 마지막 접근 후 일정 시간이 지나면 만료
+ * 	- Forced timeout: 최초 생성 후 절대 시간이 지나면 무조건 만료 (Builder.forcedTimeoutSec()로 설정)
+ * 	- Auto cleanup: 주기적으로 만료된 항목 자동 제거 (Builder.enableAutoCleanup()으로 설정)
  */
 @Slf4j
 public class SBCacheMap<K, V> implements AutoCloseable {
 
-	private final ConcurrentHashMap<K, Long> timeoutChecker;
+	private final ConcurrentHashMap<K, Long> timeoutChecker;  // 마지막 접근 기반 TTL
+	private final ConcurrentHashMap<K, Long> absoluteExpiry;  // 절대 만료 시간 (forced timeout)
 	private final ConcurrentHashMap<K, V> data;
 	private final int timeoutSec;
 	private final SBCacheMapLoader<K, V> cacheLoader;
 	private final Object lock = new Object();
 	private final ScheduledExecutorService cleanupExecutor;
 	private final AtomicBoolean closed = new AtomicBoolean(false);
+	private final int forcedTimeoutSec;  // 절대 만료 시간 (0이면 비활성화)
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
-		this(cacheLoader, timeoutSec, false, 5);
+		this(cacheLoader, timeoutSec, false, 5, 0);
 	}
 
 	/**
@@ -64,10 +69,27 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 */
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
+		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0);
+	}
+
+	/**
+	 * 모든 옵션을 설정할 수 있는 생성자
+	 *
+	 * @param cacheLoader 캐시 로더
+	 * @param timeoutSec 타임아웃 시간(초) - 접근 기반 TTL
+	 * @param enableAutoCleanup 자동 정리 활성화 여부
+	 * @param cleanupIntervalMinutes 정리 주기(분)
+	 * @param forcedTimeoutSec 절대 만료 시간(초) - 0이면 비활성화
+	 */
+	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
+					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
+					  int forcedTimeoutSec) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
+		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
+		this.forcedTimeoutSec = forcedTimeoutSec;
 
 		if (enableAutoCleanup) {
 			this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -146,6 +168,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private int timeoutSec = 60; // 기본값 60초
 		private boolean enableAutoCleanup = false;
 		private int cleanupIntervalMinutes = 5; // 기본값 5분
+		private int forcedTimeoutSec = 0; // 기본값: 비활성화
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -167,49 +190,113 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 절대 만료 시간을 설정합니다 (forced timeout).
+		 * 자주 조회하더라도 이 시간이 지나면 무조건 폐기됩니다.
+		 *
+		 * @param seconds 절대 만료 시간(초), 0이면 비활성화
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> forcedTimeoutSec(int seconds) {
+			this.forcedTimeoutSec = seconds;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
-			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes);
+			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, forcedTimeoutSec);
 		}
 	}
 
 	public V put(K key, V val) {
 		log.trace("put data - key : {} , value : {}", key, val);
-		// ThreadLocalRandom을 사용하여 0부터 timeoutSec까지의 jitter 추가 (cache stampede 방지)
-		long jitter = ThreadLocalRandom.current().nextLong(timeoutSec);
-		timeoutChecker.put(key, System.currentTimeMillis() + (timeoutSec + jitter) * 1000);
+
+		long now = System.currentTimeMillis();
+
+		// 접근 기반 TTL (jitter 포함)
+		long baseTimeoutMs = timeoutSec * 1000L;
+		long jitterMs = ThreadLocalRandom.current().nextLong(timeoutSec * 1000L);
+		timeoutChecker.put(key, now + baseTimeoutMs + jitterMs);
+
+		// 절대 만료 시간 설정 (forced timeout)
+		if (forcedTimeoutSec > 0) {
+			absoluteExpiry.put(key, now + (forcedTimeoutSec * 1000L));
+		}
+
 		return data.put(key, val);
 	}
 
 	public void putAll(Map<? extends K, ? extends V> m) {
 		log.trace("putAll data");
+		long now = System.currentTimeMillis();
 		for (K key : m.keySet()) {
-			timeoutChecker.put(key, System.currentTimeMillis() + 1000 * timeoutSec);
+			// 접근 기반 TTL
+			timeoutChecker.put(key, now + 1000L * timeoutSec);
+
+			// 절대 만료 시간 설정 (forced timeout)
+			if (forcedTimeoutSec > 0) {
+				absoluteExpiry.put(key, now + (forcedTimeoutSec * 1000L));
+			}
 		}
 		data.putAll(m);
 	}
 
 	public V get(final K key) {
 		log.trace("get data - key : {}", key);
-		synchronized (lock){
-			if (data.containsKey(key) && timeoutChecker.containsKey(key) && TimeCheckerUtil.checkExpired(timeoutChecker.get(key), timeoutSec)){
-				return data.get(key);
+
+		// 1. 캐시된 값과 타임스탬프 확인 (ConcurrentHashMap이므로 동기화 불필요)
+		V cachedValue = data.get(key);
+		Long timestamp = timeoutChecker.get(key);
+		Long absoluteExpiration = absoluteExpiry.get(key);
+
+		// 절대 만료 시간 확인 (forced timeout)
+		if (forcedTimeoutSec > 0 && absoluteExpiration != null) {
+			if (System.currentTimeMillis() > absoluteExpiration) {
+				log.trace("Forced timeout expired for key: {}", key);
+				// 절대 만료 시간 초과 - 재로드 필요
+				cachedValue = null;
+				timestamp = null;
 			}
 		}
-		try{
-			V val = cacheLoader.loadOne(key);
-			synchronized (lock){
-				put(key, val);
-				return data.get(key);
+
+		// 접근 기반 TTL 확인
+		if (cachedValue != null && timestamp != null && TimeCheckerUtil.checkExpired(timestamp, timeoutSec)) {
+			return cachedValue;
+		}
+
+		// 2. 캐시 미스 또는 만료 - 데이터 로드 (동기화 필요)
+		synchronized (lock) {
+			// Double-check: 다른 스레드가 이미 로드했을 수 있음
+			cachedValue = data.get(key);
+			timestamp = timeoutChecker.get(key);
+			absoluteExpiration = absoluteExpiry.get(key);
+
+			// 절대 만료 시간 재확인
+			if (forcedTimeoutSec > 0 && absoluteExpiration != null) {
+				if (System.currentTimeMillis() > absoluteExpiration) {
+					cachedValue = null;
+					timestamp = null;
+				}
 			}
-		}catch (SBCacheLoadFailException e){
-			synchronized (lock) {
+
+			// 접근 기반 TTL 재확인
+			if (cachedValue != null && timestamp != null && TimeCheckerUtil.checkExpired(timestamp, timeoutSec)) {
+				return cachedValue;
+			}
+
+			// 실제 로드
+			try {
+				V val = cacheLoader.loadOne(key);
+				put(key, val);
+				return val;
+			} catch (SBCacheLoadFailException e) {
 				data.remove(key);
 				timeoutChecker.remove(key);
+				absoluteExpiry.remove(key);
+				throw e;
 			}
-			throw e;
 		}
 	}
 
@@ -256,6 +343,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	public V remove(Object key) {
 		synchronized (lock) {
 			timeoutChecker.remove(key);
+			absoluteExpiry.remove(key);
 			return data.remove(key);
 		}
 	}
@@ -268,17 +356,40 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 //	}
 
 	/**
-	 * 만료된 값을 자동으로 지우는 규칙은 없는 상태.
-	 * 이걸 굳이 따로 호출할 필요가 있는지도 좀 의문.
+	 * 만료된 항목들을 제거합니다.
+	 * 자동 정리가 활성화된 경우 주기적으로 호출됩니다.
 	 */
 	public void removeExpired() {
-		for(K key : timeoutChecker.keySet()){
-			if(TimeCheckerUtil.checkExpired(timeoutChecker.get(key), timeoutSec)){
-				synchronized (lock) {
-					timeoutChecker.remove(key);
-					data.remove(key);
+		// ConcurrentModificationException 방지를 위해 만료된 키 목록을 먼저 수집
+		List<K> expiredKeys = new ArrayList<>();
+		long now = System.currentTimeMillis();
+
+		// 접근 기반 TTL 확인
+		for (Map.Entry<K, Long> entry : timeoutChecker.entrySet()) {
+			if (!TimeCheckerUtil.checkExpired(entry.getValue(), timeoutSec)) {
+				expiredKeys.add(entry.getKey());
+			}
+		}
+
+		// 절대 만료 시간 확인 (forced timeout)
+		if (forcedTimeoutSec > 0) {
+			for (Map.Entry<K, Long> entry : absoluteExpiry.entrySet()) {
+				if (now > entry.getValue() && !expiredKeys.contains(entry.getKey())) {
+					expiredKeys.add(entry.getKey());
 				}
 			}
+		}
+
+		// 수집된 키들을 제거
+		for (K key : expiredKeys) {
+			timeoutChecker.remove(key);
+			absoluteExpiry.remove(key);
+			data.remove(key);
+			log.trace("Removed expired key: {}", key);
+		}
+
+		if (!expiredKeys.isEmpty()) {
+			log.debug("Cleaned up {} expired entries", expiredKeys.size());
 		}
 	}
 

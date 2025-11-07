@@ -95,7 +95,8 @@ try (SBAsyncCacheMap<Long, User> asyncCache = new SBAsyncCacheMap<>(loader, 60))
 ```java
 try (SBCacheMap<Long, User> cache = SBCacheMap.<Long, User>builder()
         .loader(loader)
-        .timeoutSec(300)
+        .timeoutSec(300)                // 접근 기반 TTL (5분)
+        .forcedTimeoutSec(3600)         // 절대 만료 시간 (1시간) - 자주 조회해도 1시간 후 폐기
         .enableAutoCleanup(true)        // 자동 정리 활성화
         .cleanupIntervalMinutes(10)     // 10분마다 만료된 항목 제거
         .build()) {
@@ -146,6 +147,13 @@ mvn test
 - ✅ **Builder 패턴**: 가독성 높은 설정
 - ✅ **람다 지원**: `SBCacheMap.create(key -> loader, timeout)` 간편 생성
 - ✅ **자동 정리**: 선택적 만료 항목 자동 삭제 기능
+- ✅ **Forced Timeout**: 자주 조회해도 절대 시간 후 무조건 폐기
+
+### 버그 수정 및 최적화 (2025-01)
+- 🐛 **Jitter 계산 오류 수정**: 정확한 cache stampede 방지
+- 🐛 **ConcurrentModificationException 방지**: removeExpired() 안정화
+- ⚡ **get() 메서드 최적화**: Double-check locking 패턴 적용
+- ⚡ **동기화 범위 최소화**: 읽기 작업 성능 향상
 
 ## 현재 상태
 

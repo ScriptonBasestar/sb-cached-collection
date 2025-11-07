@@ -49,9 +49,10 @@ public class SBAsyncCacheMap<K, V> implements AutoCloseable {
 
 	public V put(K key, V val) {
 		log.trace("put data - key : {} , val : {}", key, val);
-		// ThreadLocalRandom을 사용하여 0부터 timeoutSec까지의 jitter 추가 (cache stampede 방지)
-		long jitter = ThreadLocalRandom.current().nextLong(timeoutSec);
-		timeoutChecker.put(key, System.currentTimeMillis() + (timeoutSec + jitter) * 1000);
+		// ThreadLocalRandom을 사용하여 0~timeoutSec 범위의 jitter 추가 (cache stampede 방지)
+		long baseTimeoutMs = timeoutSec * 1000L;
+		long jitterMs = ThreadLocalRandom.current().nextLong(timeoutSec * 1000L);
+		timeoutChecker.put(key, System.currentTimeMillis() + baseTimeoutMs + jitterMs);
 		return data.put(key, val);
 	}
 
