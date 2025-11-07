@@ -1,6 +1,7 @@
 package org.scriptonbasestar.cache.collection.map;
 
 import lombok.extern.slf4j.Slf4j;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.junit.Assert;
 import org.junit.Test;

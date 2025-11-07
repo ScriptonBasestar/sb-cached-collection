@@ -2,6 +2,7 @@ package org.scriptonbasestar.cache.collection.map;
 
 import org.junit.Test;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 
 import java.util.Arrays;

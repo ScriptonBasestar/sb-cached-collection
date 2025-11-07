@@ -1,4 +1,4 @@
-package org.scriptonbasestar.cache.collection.strategy;
+package org.scriptonbasestar.cache.core.strategy;
 
 /**
  * 캐시 로딩 전략

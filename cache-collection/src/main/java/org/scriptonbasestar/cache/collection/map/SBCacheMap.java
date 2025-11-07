@@ -2,7 +2,8 @@ package org.scriptonbasestar.cache.collection.map;
 
 import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
-import org.scriptonbasestar.cache.collection.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
+import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 

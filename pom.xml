@@ -12,7 +12,7 @@
 		<!--<module>cache-loader-file</module>-->
 	</modules>
 	<packaging>pom</packaging>
-	<version>sb-cache-20181013-1-DEV</version>
+	<version>sb-cache-20251107-1-DEV</version>
 
 	<properties>
 		<java-version>1.8</java-version>

@@ -2,7 +2,7 @@ package org.scriptonbasestar.cache.collection.list;
 
 import org.junit.Test;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
-import org.scriptonbasestar.cache.collection.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 
 import java.util.ArrayList;
 import java.util.Arrays;

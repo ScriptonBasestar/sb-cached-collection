@@ -15,7 +15,7 @@
 		<!-- this project -->
 		<dependency>
 			<groupId>org.scriptonbasestar.cache</groupId>
-			<artifactId>cache-collection</artifactId>
+			<artifactId>cache-core</artifactId>
 		</dependency>
 
 		<!-- Redis Client - Jedis -->

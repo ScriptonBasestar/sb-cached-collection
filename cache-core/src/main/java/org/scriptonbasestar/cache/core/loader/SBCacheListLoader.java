@@ -1,4 +1,4 @@
-package org.scriptonbasestar.cache.collection.list;
+package org.scriptonbasestar.cache.core.loader;
 
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 

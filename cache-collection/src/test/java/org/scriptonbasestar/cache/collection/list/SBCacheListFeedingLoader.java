@@ -2,6 +2,7 @@ package org.scriptonbasestar.cache.collection.list;
 
 
 import lombok.extern.slf4j.Slf4j;
+import org.scriptonbasestar.cache.core.loader.SBCacheListLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 
 import java.util.ArrayList;

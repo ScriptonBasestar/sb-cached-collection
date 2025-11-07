@@ -1,7 +1,7 @@
 package org.scriptonbasestar.cache.loader.redis;
 
 import lombok.extern.slf4j.Slf4j;
-import org.scriptonbasestar.cache.collection.map.SBCacheMapLoader;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import redis.clients.jedis.JedisPooled;
 

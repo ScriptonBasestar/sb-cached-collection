@@ -1,6 +1,8 @@
 package org.scriptonbasestar.cache.collection.map;
 
 import lombok.extern.slf4j.Slf4j;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
+import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 
 import java.util.Map;
@@ -14,7 +16,7 @@ import java.util.concurrent.TimeUnit;
  * 비동기 캐시 Map 구현체
  *
  * <p><strong>⚠️ Deprecated:</strong> 이 클래스는 더 이상 권장되지 않습니다.
- * {@link SBCacheMap}에 {@link org.scriptonbasestar.cache.collection.strategy.LoadStrategy#ASYNC}를 사용하세요.</p>
+ * {@link SBCacheMap}에 {@link LoadStrategy#ASYNC}를 사용하세요.</p>
  *
  * <h3>마이그레이션 가이드:</h3>
  * <pre>{@code

@@ -1,7 +1,7 @@
 package org.scriptonbasestar.cache.collection.list;
 
 import org.junit.Test;
-import org.scriptonbasestar.cache.collection.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 
 import java.util.List;

@@ -3,6 +3,7 @@ package org.scriptonbasestar.cache.collection.map;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 
 import java.util.concurrent.atomic.AtomicInteger;
