@@ -2,7 +2,6 @@ package org.scriptonbasestar.cache.core.util;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
-import lombok.extern.slf4j.Slf4j;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -15,7 +14,6 @@ import java.util.Date;
  * @athor archmagece
  * @since 2017-01-17 16
  */
-@Slf4j
 public class TimeCheckerUtilTest {
 
 	@Before

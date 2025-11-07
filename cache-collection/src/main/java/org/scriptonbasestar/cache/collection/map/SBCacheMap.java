@@ -1,11 +1,12 @@
 package org.scriptonbasestar.cache.collection.map;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -44,8 +45,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 	- Metrics: 히트율, 미스율 등 통계 정보 (Builder.enableMetrics()로 설정)
  * 	- Per-item TTL: 항목별로 다른 TTL 설정 가능 (put(key, value, customTtlSec))
  */
-@Slf4j
 public class SBCacheMap<K, V> implements AutoCloseable {
+
+	private static final Logger log = LoggerFactory.getLogger(SBCacheMap.class);
 
 	private final ConcurrentHashMap<K, Long> timeoutChecker;  // 마지막 접근 기반 TTL
 	private final ConcurrentHashMap<K, Long> absoluteExpiry;  // 절대 만료 시간 (forced timeout)

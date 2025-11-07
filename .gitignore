@@ -24,3 +24,6 @@ logs
 
 ### maven build source
 target
+
+### 
+tmp/

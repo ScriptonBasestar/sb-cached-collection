@@ -1,6 +1,5 @@
 package org.scriptonbasestar.cache.collection.map;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.junit.Assert;
@@ -17,7 +16,6 @@ import java.util.concurrent.TimeUnit;
  * @author archmagece
  * @since 2016-11-07
  */
-@Slf4j
 public class SBCacheMapTest {
 
 	private final SBCacheMapDataFeeder dataFeeder = new SBCacheMapDataFeeder();

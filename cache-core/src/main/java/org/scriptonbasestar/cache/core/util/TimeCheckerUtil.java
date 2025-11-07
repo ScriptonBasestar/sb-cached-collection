@@ -1,7 +1,7 @@
 package org.scriptonbasestar.cache.core.util;
 
-import lombok.experimental.UtilityClass;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -11,9 +11,13 @@ import java.util.Date;
  * @athor archmagece
  * @since 2017-01-17 16
  */
-@Slf4j
-@UtilityClass
-public class TimeCheckerUtil {
+public final class TimeCheckerUtil {
+
+	private static final Logger log = LoggerFactory.getLogger(TimeCheckerUtil.class);
+
+	private TimeCheckerUtil() {
+		throw new AssertionError("Utility class should not be instantiated");
+	}
 
 	/**
 	 * @deprecated Use {@link #checkExpired(long, int)} with System.currentTimeMillis() instead.

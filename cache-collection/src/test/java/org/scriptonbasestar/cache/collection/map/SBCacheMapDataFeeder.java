@@ -1,7 +1,8 @@
 package org.scriptonbasestar.cache.collection.map;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -10,8 +11,8 @@ import java.util.Map;
  * @Author archmagece
  * @CreatedAt 2016-12-07 18
  */
-@Slf4j
 public class SBCacheMapDataFeeder {
+	private static final Logger log = LoggerFactory.getLogger(SBCacheMapDataFeeder.class);
 	private static final Map<Long,String> sampleData = new HashMap<>();
 	static {
 		for (int i = 0; i < 30; i++) {

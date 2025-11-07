@@ -1,8 +1,9 @@
 package org.scriptonbasestar.cache.collection.map;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 
@@ -28,8 +29,9 @@ import java.util.Map;
  * @param <K> 키 타입
  * @param <V> 값 타입
  */
-@Slf4j
 public class ChainedCacheMapLoader<K, V> implements SBCacheMapLoader<K, V> {
+
+	private static final Logger log = LoggerFactory.getLogger(ChainedCacheMapLoader.class);
 
 	private final SBCacheMap<K, V> nextLevelCache;
 

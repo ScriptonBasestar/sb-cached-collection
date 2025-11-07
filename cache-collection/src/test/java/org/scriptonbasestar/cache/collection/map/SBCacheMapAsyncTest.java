@@ -1,6 +1,7 @@
 package org.scriptonbasestar.cache.collection.map;
 
 import org.junit.Test;
+import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 

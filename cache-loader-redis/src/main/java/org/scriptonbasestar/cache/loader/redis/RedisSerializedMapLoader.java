@@ -1,8 +1,9 @@
 package org.scriptonbasestar.cache.loader.redis;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import redis.clients.jedis.JedisPooled;
 
 import java.io.*;
@@ -28,8 +29,9 @@ import java.util.Set;
  * @author archmagece
  * @since 2025-01
  */
-@Slf4j
 public class RedisSerializedMapLoader<K, V extends Serializable> implements SBCacheMapLoader<K, V>, AutoCloseable {
+
+	private static final Logger log = LoggerFactory.getLogger(RedisSerializedMapLoader.class);
 
 	private final JedisPooled jedis;
 	private final String keyPrefix;

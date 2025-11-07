@@ -7,4 +7,20 @@ package org.scriptonbasestar.cache.core.exception;
  *
  */
 public class SBCacheLoadFailException extends RuntimeException {
+
+	public SBCacheLoadFailException() {
+		super();
+	}
+
+	public SBCacheLoadFailException(String message) {
+		super(message);
+	}
+
+	public SBCacheLoadFailException(String message, Throwable cause) {
+		super(message, cause);
+	}
+
+	public SBCacheLoadFailException(Throwable cause) {
+		super(cause);
+	}
 }

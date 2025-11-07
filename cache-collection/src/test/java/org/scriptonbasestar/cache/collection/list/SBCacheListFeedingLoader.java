@@ -1,9 +1,10 @@
 package org.scriptonbasestar.cache.collection.list;
 
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.loader.SBCacheListLoader;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -12,8 +13,8 @@ import java.util.List;
  * @author archmagece
  * @since 2016-11-07
  */
-@Slf4j
 public class SBCacheListFeedingLoader implements SBCacheListLoader<String> {
+	private static final Logger log = LoggerFactory.getLogger(SBCacheListFeedingLoader.class);
 	private static final List<String> sampleData = new ArrayList<>();
 
 	static {

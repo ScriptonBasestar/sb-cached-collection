@@ -2,6 +2,7 @@ package org.scriptonbasestar.cache.collection.list;
 
 import org.junit.Test;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
+import org.scriptonbasestar.cache.core.loader.SBCacheListLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 
 import java.util.ArrayList;

@@ -1,9 +1,10 @@
 package org.scriptonbasestar.cache.collection.list;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheListLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -53,8 +54,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * @author archmagece
  * @since 2016-11-06
  */
-@Slf4j
 public class SBCacheList<E> implements AutoCloseable {
+
+	private static final Logger log = LoggerFactory.getLogger(SBCacheList.class);
 
 	private final List<E> data;  // 실제 데이터 (CopyOnWriteArrayList로 동시성 보장)
 	private final AtomicLong lastAccessTime;  // 마지막 접근 시간 (밀리초)

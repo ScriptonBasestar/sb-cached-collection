@@ -1,9 +1,10 @@
 package org.scriptonbasestar.cache.collection.map;
 
-import lombok.extern.slf4j.Slf4j;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,9 +42,10 @@ import java.util.concurrent.TimeUnit;
  * @since 2015-08-26
  * @deprecated SBCacheMap with LoadStrategy.ASYNC를 사용하세요
  */
-@Slf4j
 @Deprecated(since = "2.0.0", forRemoval = true)
 public class SBAsyncCacheMap<K, V> implements AutoCloseable {
+
+	private static final Logger log = LoggerFactory.getLogger(SBAsyncCacheMap.class);
 
 	private final ConcurrentHashMap<K, Long> timeoutChecker;
 	private final ConcurrentHashMap<K, V> data;
