@@ -1,6 +1,7 @@
 package org.scriptonbasestar.cache.collection.map;
 
 import lombok.extern.slf4j.Slf4j;
+import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 
@@ -41,6 +42,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 	- Access-based TTL: 마지막 접근 후 일정 시간이 지나면 만료
  * 	- Forced timeout: 최초 생성 후 절대 시간이 지나면 무조건 만료 (Builder.forcedTimeoutSec()로 설정)
  * 	- Auto cleanup: 주기적으로 만료된 항목 자동 제거 (Builder.enableAutoCleanup()으로 설정)
+ * 	- Max size: 최대 캐시 크기 제한 (Builder.maxSize()로 설정)
+ * 	- Metrics: 히트율, 미스율 등 통계 정보 (Builder.enableMetrics()로 설정)
+ * 	- Per-item TTL: 항목별로 다른 TTL 설정 가능 (put(key, value, customTtlSec))
  */
 @Slf4j
 public class SBCacheMap<K, V> implements AutoCloseable {
@@ -48,15 +52,19 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final ConcurrentHashMap<K, Long> timeoutChecker;  // 마지막 접근 기반 TTL
 	private final ConcurrentHashMap<K, Long> absoluteExpiry;  // 절대 만료 시간 (forced timeout)
 	private final ConcurrentHashMap<K, V> data;
+	private final LinkedHashMap<K, Long> insertionOrder;  // LRU를 위한 삽입 순서 (maxSize > 0일 때만 사용)
 	private final int timeoutSec;
 	private final SBCacheMapLoader<K, V> cacheLoader;
 	private final Object lock = new Object();
+	private final Object lruLock = new Object();  // LRU 작업용 별도 락
 	private final ScheduledExecutorService cleanupExecutor;
 	private final AtomicBoolean closed = new AtomicBoolean(false);
 	private final int forcedTimeoutSec;  // 절대 만료 시간 (0이면 비활성화)
+	private final int maxSize;  // 최대 캐시 크기 (0이면 무제한)
+	private final CacheMetrics metrics;  // 통계 (null이면 비활성화)
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
-		this(cacheLoader, timeoutSec, false, 5, 0);
+		this(cacheLoader, timeoutSec, false, 5, 0, 0, false);
 	}
 
 	/**
@@ -69,27 +77,37 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 */
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
-		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0);
+		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false);
 	}
 
 	/**
-	 * 모든 옵션을 설정할 수 있는 생성자
+	 * 모든 옵션을 설정할 수 있는 생성자 (내부용)
 	 *
 	 * @param cacheLoader 캐시 로더
 	 * @param timeoutSec 타임아웃 시간(초) - 접근 기반 TTL
 	 * @param enableAutoCleanup 자동 정리 활성화 여부
 	 * @param cleanupIntervalMinutes 정리 주기(분)
 	 * @param forcedTimeoutSec 절대 만료 시간(초) - 0이면 비활성화
+	 * @param maxSize 최대 캐시 크기 - 0이면 무제한
+	 * @param enableMetrics 통계 수집 활성화 여부
 	 */
-	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
+	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
-					  int forcedTimeoutSec) {
+					  int forcedTimeoutSec, int maxSize, boolean enableMetrics) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
 		this.forcedTimeoutSec = forcedTimeoutSec;
+		this.maxSize = maxSize;
+		this.metrics = enableMetrics ? new CacheMetrics() : null;
+		this.insertionOrder = maxSize > 0 ? new LinkedHashMap<K, Long>(16, 0.75f, true) {
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
+				return false;  // 수동으로 제거
+			}
+		} : null;
 
 		if (enableAutoCleanup) {
 			this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -169,6 +187,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private boolean enableAutoCleanup = false;
 		private int cleanupIntervalMinutes = 5; // 기본값 5분
 		private int forcedTimeoutSec = 0; // 기본값: 비활성화
+		private int maxSize = 0; // 기본값: 무제한
+		private boolean enableMetrics = false; // 기본값: 비활성화
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -202,22 +222,64 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 최대 캐시 크기를 설정합니다.
+		 * 크기 초과 시 가장 오래 전에 사용된 항목이 자동으로 제거됩니다 (LRU).
+		 *
+		 * @param size 최대 크기, 0이면 무제한
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> maxSize(int size) {
+			this.maxSize = size;
+			return this;
+		}
+
+		/**
+		 * 캐시 통계 수집을 활성화합니다.
+		 * 히트율, 미스율, 평균 로드 시간 등을 측정합니다.
+		 *
+		 * @param enable true면 통계 수집 활성화
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> enableMetrics(boolean enable) {
+			this.enableMetrics = enable;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
-			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, forcedTimeoutSec);
+			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
+				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics);
 		}
 	}
 
 	public V put(K key, V val) {
-		log.trace("put data - key : {} , value : {}", key, val);
+		return put(key, val, timeoutSec);
+	}
+
+	/**
+	 * 캐시에 항목을 저장하며, 해당 항목에 대해 커스텀 TTL을 설정합니다.
+	 *
+	 * @param key 키
+	 * @param val 값
+	 * @param customTtlSec 이 항목에 대한 TTL (초)
+	 * @return 이전 값 (없으면 null)
+	 */
+	public V put(K key, V val, int customTtlSec) {
+		log.trace("put data - key : {} , value : {}, ttl : {}", key, val, customTtlSec);
+
+		// maxSize 체크 및 LRU 제거
+		if (maxSize > 0) {
+			evictIfNecessary();
+		}
 
 		long now = System.currentTimeMillis();
 
 		// 접근 기반 TTL (jitter 포함)
-		long baseTimeoutMs = timeoutSec * 1000L;
-		long jitterMs = ThreadLocalRandom.current().nextLong(timeoutSec * 1000L);
+		long baseTimeoutMs = customTtlSec * 1000L;
+		long jitterMs = ThreadLocalRandom.current().nextLong(customTtlSec * 1000L);
 		timeoutChecker.put(key, now + baseTimeoutMs + jitterMs);
 
 		// 절대 만료 시간 설정 (forced timeout)
@@ -225,7 +287,40 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			absoluteExpiry.put(key, now + (forcedTimeoutSec * 1000L));
 		}
 
+		// LRU 추적 (maxSize > 0일 때만)
+		if (insertionOrder != null) {
+			synchronized (lruLock) {
+				insertionOrder.put(key, now);
+			}
+		}
+
 		return data.put(key, val);
+	}
+
+	/**
+	 * maxSize 초과 시 가장 오래된 항목 제거 (LRU)
+	 */
+	private void evictIfNecessary() {
+		if (data.size() >= maxSize) {
+			synchronized (lruLock) {
+				if (data.size() >= maxSize && insertionOrder != null && !insertionOrder.isEmpty()) {
+					// 가장 오래된 항목 찾기
+					K eldestKey = insertionOrder.keySet().iterator().next();
+					log.trace("Evicting eldest key due to maxSize: {}", eldestKey);
+
+					// 제거
+					data.remove(eldestKey);
+					timeoutChecker.remove(eldestKey);
+					absoluteExpiry.remove(eldestKey);
+					insertionOrder.remove(eldestKey);
+
+					// 메트릭 기록
+					if (metrics != null) {
+						metrics.recordEviction(1);
+					}
+				}
+			}
+		}
 	}
 
 	public void putAll(Map<? extends K, ? extends V> m) {
@@ -263,7 +358,22 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 		// 접근 기반 TTL 확인
 		if (cachedValue != null && timestamp != null && TimeCheckerUtil.checkExpired(timestamp, timeoutSec)) {
+			// 캐시 히트
+			if (metrics != null) {
+				metrics.recordHit();
+			}
+			// LRU 업데이트 (액세스 순서)
+			if (insertionOrder != null) {
+				synchronized (lruLock) {
+					insertionOrder.put(key, System.currentTimeMillis());
+				}
+			}
 			return cachedValue;
+		}
+
+		// 캐시 미스
+		if (metrics != null) {
+			metrics.recordMiss();
 		}
 
 		// 2. 캐시 미스 또는 만료 - 데이터 로드 (동기화 필요)
@@ -287,14 +397,28 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			}
 
 			// 실제 로드
+			long loadStartTime = System.nanoTime();
 			try {
 				V val = cacheLoader.loadOne(key);
 				put(key, val);
+
+				// 로드 성공 메트릭
+				if (metrics != null) {
+					long loadTime = System.nanoTime() - loadStartTime;
+					metrics.recordLoadSuccess(loadTime);
+				}
+
 				return val;
 			} catch (SBCacheLoadFailException e) {
 				data.remove(key);
 				timeoutChecker.remove(key);
 				absoluteExpiry.remove(key);
+
+				// 로드 실패 메트릭
+				if (metrics != null) {
+					metrics.recordLoadFailure();
+				}
+
 				throw e;
 			}
 		}
@@ -424,6 +548,50 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	@Override
 	public String toString() {
 		return data.toString();
+	}
+
+	/**
+	 * 캐시 워밍업: loader.loadAll()을 호출하여 모든 데이터를 미리 로드합니다.
+	 * 애플리케이션 시작 시 초기 지연을 방지하기 위해 사용합니다.
+	 *
+	 * @throws SBCacheLoadFailException 로드 실패 시
+	 */
+	public void warmUp() throws SBCacheLoadFailException {
+		log.debug("Starting cache warm-up");
+		Map<K, V> allData = cacheLoader.loadAll();
+		if (allData != null && !allData.isEmpty()) {
+			putAll(allData);
+			log.info("Cache warmed up with {} items", allData.size());
+		}
+	}
+
+	/**
+	 * 특정 키 목록에 대해 캐시 워밍업을 수행합니다.
+	 *
+	 * @param keys 미리 로드할 키 목록
+	 */
+	public void warmUp(Collection<K> keys) {
+		log.debug("Starting cache warm-up for {} keys", keys.size());
+		int loadedCount = 0;
+		for (K key : keys) {
+			try {
+				V value = cacheLoader.loadOne(key);
+				put(key, value);
+				loadedCount++;
+			} catch (SBCacheLoadFailException e) {
+				log.warn("Failed to warm up key: {}", key, e);
+			}
+		}
+		log.info("Cache warmed up with {}/{} items", loadedCount, keys.size());
+	}
+
+	/**
+	 * 캐시 통계를 반환합니다.
+	 *
+	 * @return CacheMetrics 인스턴스, 메트릭이 비활성화되어 있으면 null
+	 */
+	public CacheMetrics metrics() {
+		return metrics;
 	}
 
 	/**

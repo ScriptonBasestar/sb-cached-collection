@@ -112,12 +112,50 @@ try (SBCacheMap<Long, User> cache = SBCacheMap.<Long, User>builder()
         .loader(loader)
         .timeoutSec(300)                // 접근 기반 TTL (5분)
         .forcedTimeoutSec(3600)         // 절대 만료 시간 (1시간) - 자주 조회해도 1시간 후 폐기
+        .maxSize(10000)                 // 최대 1만개 (초과 시 LRU 제거)
+        .enableMetrics(true)            // 통계 수집 활성화
         .enableAutoCleanup(true)        // 자동 정리 활성화
         .cleanupIntervalMinutes(10)     // 10분마다 만료된 항목 제거
         .build()) {
 
     User user = cache.get(1L);
+
+    // 통계 확인
+    CacheMetrics metrics = cache.metrics();
+    System.out.println("Hit rate: " + metrics.hitRate() * 100 + "%");
+    System.out.println("Average load time: " + metrics.averageLoadPenalty() / 1000 + "μs");
 }
+```
+
+### 항목별 TTL 설정
+
+```java
+SBCacheMap<String, Config> cache = new SBCacheMap<>(loader, 300);
+
+// 일반 데이터는 5분 (300초)
+cache.put("user:123", userData);
+
+// 중요한 설정은 30초만 캐싱
+cache.put("admin:settings", adminSettings, 30);
+
+// 정적 데이터는 1시간 캐싱
+cache.put("static:menu", menuData, 3600);
+```
+
+### 캐시 워밍업
+
+```java
+SBCacheMap<Long, User> cache = new SBCacheMap<>(loader, 300);
+
+// 방법 1: 전체 데이터 미리 로드 (loader.loadAll() 호출)
+cache.warmUp();
+
+// 방법 2: 특정 키만 미리 로드
+List<Long> importantUserIds = Arrays.asList(1L, 2L, 3L, 100L);
+cache.warmUp(importantUserIds);
+
+// 이제 첫 요청도 빠름 (이미 캐시됨)
+User user = cache.get(1L);  // 즉시 반환
 ```
 
 ### 새로운 방식: 람다 표현식 (가장 간단)
@@ -290,6 +328,13 @@ mvn test
 - ✅ **불필요한 필드 제거**: SBAsyncCacheMap의 isDataDurable 필드 제거
 - ✅ **getAll() 구현**: SBCacheMap에 현재 캐시 전체 조회 기능 추가
 - ✅ **SBAsyncCacheMap Builder 패턴**: 설정 가능한 스레드 풀 크기 지원
+
+### Phase 6: 핵심 유용성 개선 (2025-01)
+- ✅ **CacheMetrics 클래스**: 히트율, 미스율, 평균 로드 시간 등 통계 수집
+- ✅ **최대 크기 제한 (maxSize)**: LRU 방식으로 오래된 항목 자동 제거, OOM 방지
+- ✅ **항목별 TTL 설정**: put(key, value, customTtlSec)로 항목마다 다른 만료 시간 설정
+- ✅ **캐시 워밍업**: warmUp() / warmUp(keys) 메서드로 초기 지연 방지
+- ✅ **Builder 확장**: maxSize, enableMetrics 옵션 추가
 
 ## 현재 상태
 
