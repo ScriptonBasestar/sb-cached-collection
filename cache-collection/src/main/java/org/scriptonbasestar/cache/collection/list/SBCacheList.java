@@ -67,7 +67,7 @@ public class SBCacheList<E> extends ArrayList<E> {
 		log.trace("SBCacheList get - s");
 		if (updatedAt.plusSeconds(timeoutSec).isBefore(LocalTime.now())) {
 			log.trace("SBCacheList get - cache time expired");
-			updatedAt.plusSeconds(timeoutSec);
+			updatedAt = LocalTime.now();
 
 			if(loadStrategy == LoadStrategy.ONE){
 				log.trace("SBCacheList get - loadOne");

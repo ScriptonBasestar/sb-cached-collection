@@ -30,21 +30,73 @@ public class SBAsyncCacheMap<K, V> implements AutoCloseable {
 
 	private final ExecutorService executor;
 	//async
-	private final int NUMBER_OF_THREAD = 5;
-
-	//if fail throw exception?? or use old data
-	private boolean isDataDurable;
+	private final int numberOfThreads;
 
 
 	public SBAsyncCacheMap(SBCacheMapLoader cacheLoader, int timeoutSec) {
+		this(cacheLoader, timeoutSec, 5);
+	}
+
+	public SBAsyncCacheMap(SBCacheMapLoader cacheLoader, int timeoutSec, int numberOfThreads) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
+		this.numberOfThreads = numberOfThreads;
 
 		//async
-		this.isDataDurable = false;
-		this.executor = Executors.newFixedThreadPool(NUMBER_OF_THREAD);
+		this.executor = Executors.newFixedThreadPool(numberOfThreads);
+	}
+
+	/**
+	 * Builder 패턴을 사용하여 SBAsyncCacheMap을 생성합니다.
+	 *
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 * @return Builder 인스턴스
+	 */
+	public static <K, V> Builder<K, V> builder() {
+		return new Builder<>();
+	}
+
+	/**
+	 * SBAsyncCacheMap Builder 클래스
+	 *
+	 * @param <K> 키 타입
+	 * @param <V> 값 타입
+	 */
+	public static class Builder<K, V> {
+		private SBCacheMapLoader<K, V> loader;
+		private int timeoutSec = 60; // 기본값 60초
+		private int numberOfThreads = 5; // 기본값 5개 스레드
+
+		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
+			this.loader = loader;
+			return this;
+		}
+
+		public Builder<K, V> timeoutSec(int timeoutSec) {
+			this.timeoutSec = timeoutSec;
+			return this;
+		}
+
+		/**
+		 * 비동기 작업을 처리할 스레드 풀 크기를 설정합니다.
+		 *
+		 * @param threads 스레드 수 (기본값: 5)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> numberOfThreads(int threads) {
+			this.numberOfThreads = threads;
+			return this;
+		}
+
+		public SBAsyncCacheMap<K, V> build() {
+			if (loader == null) {
+				throw new IllegalStateException("loader must be set");
+			}
+			return new SBAsyncCacheMap<>(loader, timeoutSec, numberOfThreads);
+		}
 	}
 
 	public V put(K key, V val) {

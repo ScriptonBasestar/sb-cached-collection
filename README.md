@@ -90,9 +90,19 @@ List<Product> products = cacheList.getList();
 ### 비동기 캐시 맵 (이전 데이터 반환 + 백그라운드 갱신)
 
 ```java
+// 기본 생성자 사용
 try (SBAsyncCacheMap<Long, User> asyncCache = new SBAsyncCacheMap<>(loader, 60)) {
     User user = asyncCache.get(1L);  // 만료된 경우에도 이전 데이터를 즉시 반환하고 백그라운드에서 갱신
 } // 자동으로 리소스 정리
+
+// Builder 패턴 사용 (스레드 풀 크기 설정 가능)
+try (SBAsyncCacheMap<Long, User> asyncCache = SBAsyncCacheMap.<Long, User>builder()
+        .loader(loader)
+        .timeoutSec(60)
+        .numberOfThreads(10)  // 스레드 풀 크기 설정 (기본값: 5)
+        .build()) {
+    User user = asyncCache.get(1L);
+}
 ```
 
 ### 새로운 방식: Builder 패턴 (권장)
@@ -271,6 +281,15 @@ mvn test
 - ✅ **AutoCloseable 지원**: try-with-resources로 안전한 리소스 관리
 - ✅ **ChainedCacheMapLoader**: 2단/3단 캐싱 지원 (메모리 → Redis 체이닝)
 - ✅ **cache-loader-inmemory 제거**: 불필요한 모듈 정리
+
+### Phase 5: 코드 정리 및 누락 기능 완성 (2025-01)
+- ✅ **SBCacheList 버그 수정**: updatedAt 필드가 업데이트되지 않던 버그 수정 (LocalTime 불변성 오해)
+- ✅ **Dead Code 제거**: 주석 처리된 SBCacheMapOld.java (162줄) 삭제
+- ✅ **빈 인터페이스 제거**: Catcher/Shooter 인터페이스 4개 삭제 (구현체 없음)
+- ✅ **미사용 Enum 제거**: InitStrategy, NoticeStrategy, SyncStrategy 삭제
+- ✅ **불필요한 필드 제거**: SBAsyncCacheMap의 isDataDurable 필드 제거
+- ✅ **getAll() 구현**: SBCacheMap에 현재 캐시 전체 조회 기능 추가
+- ✅ **SBAsyncCacheMap Builder 패턴**: 설정 가능한 스레드 풀 크기 지원
 
 ## 현재 상태
 

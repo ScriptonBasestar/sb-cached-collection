@@ -301,10 +301,13 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	}
 
 	/**
-	 * 필요해보이면 구현예정
+	 * 현재 캐시에 저장된 모든 항목을 반환합니다.
+	 * 반환된 Map은 수정 불가능한(unmodifiable) 뷰입니다.
+	 *
+	 * @return 캐시에 저장된 모든 키-값 쌍의 수정 불가능한 뷰
 	 */
-	public void getAll() {
-		throw new UnsupportedOperationException("getAll() not yet implemented");
+	public Map<K, V> getAll() {
+		return Collections.unmodifiableMap(data);
 	}
 
 	public void postponeOne(K key) {
