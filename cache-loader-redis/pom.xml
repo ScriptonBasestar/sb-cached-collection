@@ -17,5 +17,19 @@
 			<groupId>org.scriptonbasestar.cache</groupId>
 			<artifactId>cache-collection</artifactId>
 		</dependency>
+
+		<!-- Redis Client - Jedis -->
+		<dependency>
+			<groupId>redis.clients</groupId>
+			<artifactId>jedis</artifactId>
+			<version>5.1.0</version>
+		</dependency>
+
+		<!-- Apache Commons Pool (Jedis 연결 풀링) -->
+		<dependency>
+			<groupId>org.apache.commons</groupId>
+			<artifactId>commons-pool2</artifactId>
+			<version>2.12.0</version>
+		</dependency>
 	</dependencies>
 </project>

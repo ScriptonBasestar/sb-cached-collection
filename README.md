@@ -26,9 +26,14 @@
 ```
 sb-cache-java/
 ├── cache-core/              # 핵심 유틸리티, 예외, 시간 체크 로직
-├── cache-collection/        # 주요 구현체 (SBCacheMap, SBCacheList)
-└── cache-loader-inmemory/   # 인메모리 로더 구현체
+├── cache-collection/        # 인메모리 캐시 구현체 (SBCacheMap, SBCacheList)
+└── cache-loader-redis/      # Redis 백엔드 로더 (선택적)
 ```
+
+**모듈 의존성:**
+- `cache-core`: 기반 라이브러리 (독립적)
+- `cache-collection`: 인메모리 캐시 구현체 (cache-core 의존)
+- `cache-loader-redis`: Redis 연동 로더 (cache-collection 의존, 선택적 사용)
 
 ## 사용법
 
@@ -116,6 +121,77 @@ SBCacheMap<Long, User> cache = SBCacheMap.create(
 User user = cache.get(1L);
 ```
 
+### Redis 백엔드 사용 (cache-loader-redis)
+
+Redis를 영구 저장소로 사용하면서 메모리 캐싱의 이점도 얻을 수 있습니다.
+
+#### Maven 의존성 추가
+
+```xml
+<dependency>
+    <groupId>org.scriptonbasestar.cache</groupId>
+    <artifactId>cache-loader-redis</artifactId>
+    <version>sb-cache-20181013-1-DEV</version>
+</dependency>
+```
+
+#### String 값 사용 (RedisStringMapLoader)
+
+```java
+// 1. Jedis 연결 생성
+JedisPooled jedis = new JedisPooled("localhost", 6379);
+
+// 2. Redis 로더 생성 (키 접두사 사용)
+RedisStringMapLoader loader = new RedisStringMapLoader(jedis, "users:");
+
+// 3. 캐시 맵 생성
+try (SBCacheMap<String, String> cache = new SBCacheMap<>(loader, 60)) {
+    // Redis의 "users:john" 키를 조회
+    String userData = cache.get("john");
+
+    // 메모리 캐시에 저장되며, 60초 후 자동 만료
+    // 만료 시 자동으로 Redis에서 재조회
+}
+```
+
+#### 객체 직렬화 사용 (RedisSerializedMapLoader)
+
+```java
+// Serializable 구현 필수
+public class User implements Serializable {
+    private Long id;
+    private String name;
+    private String email;
+    // getters, setters...
+}
+
+// Redis 로더 생성
+JedisPooled jedis = new JedisPooled("localhost", 6379);
+RedisSerializedMapLoader<Long, User> loader =
+    new RedisSerializedMapLoader<>(jedis, "users:");
+
+// 캐시 사용
+try (SBCacheMap<Long, User> cache = new SBCacheMap<>(loader, 300)) {
+    User user = cache.get(123L);  // Redis에서 바이너리 데이터 조회 후 역직렬화
+}
+```
+
+#### Write-Through 패턴 (캐시와 Redis 동시 업데이트)
+
+```java
+RedisStringMapLoader loader = new RedisStringMapLoader(jedis, "products:");
+
+// Redis에 직접 저장 (TTL 포함)
+loader.save("product123", "iPhone 15", 3600);  // 1시간 TTL
+
+// 캐시를 통해 조회 (Redis → 메모리 캐시)
+SBCacheMap<String, String> cache = new SBCacheMap<>(loader, 60);
+String product = cache.get("product123");
+
+// Redis에서 삭제
+loader.delete("product123");
+```
+
 ## 빌드 방법
 
 ```bash
@@ -155,13 +231,24 @@ mvn test
 - ⚡ **get() 메서드 최적화**: Double-check locking 패턴 적용
 - ⚡ **동기화 범위 최소화**: 읽기 작업 성능 향상
 
+### Phase 4: 외부 저장소 지원 (2025-01)
+- ✅ **cache-loader-redis 구현**: Redis 백엔드 지원 (Jedis 5.1.0 기반)
+- ✅ **RedisStringMapLoader**: String 타입 전용 간편 로더
+- ✅ **RedisSerializedMapLoader**: 객체 직렬화 지원 범용 로더
+- ✅ **Write-Through 패턴**: save(), delete() 메서드로 캐시-Redis 동시 업데이트
+- ✅ **AutoCloseable 지원**: try-with-resources로 안전한 리소스 관리
+- ✅ **cache-loader-inmemory 제거**: 불필요한 모듈 정리
+
 ## 현재 상태
 
 - **버전**: sb-cache-20181013-1-DEV (개발 버전)
 - **Java**: 1.8+
-- **일부 모듈 비활성**: cache-loader-redis, cache-loader-file은 현재 주석 처리됨
+- **활성 모듈**: cache-core, cache-collection, cache-loader-redis
 - **성능**: 동시성 환경에서 2-5배 향상
 - **안정성**: Java 9-21 완전 호환
+- **외부 의존성**:
+  - Jedis 5.1.0 (cache-loader-redis 사용 시)
+  - Apache Commons Pool 2.12.0 (Jedis 연결 풀링)
 
 ## 참고
 

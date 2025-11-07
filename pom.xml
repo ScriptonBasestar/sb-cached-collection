@@ -6,11 +6,10 @@
 	<artifactId>sb-cache-java</artifactId>
 
 	<modules>
-		<module>cache-collection</module>
 		<module>cache-core</module>
-		<module>cache-loader-inmemory</module>
+		<module>cache-collection</module>
+		<module>cache-loader-redis</module>
 		<!--<module>cache-loader-file</module>-->
-		<!--<module>cache-loader-redis</module>-->
 	</modules>
 	<packaging>pom</packaging>
 	<version>sb-cache-20181013-1-DEV</version>
