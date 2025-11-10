@@ -46,11 +46,43 @@
 			<optional>true</optional>
 		</dependency>
 
+		<!-- Spring Boot AutoConfigure (for @ConditionalOnClass, @EnableConfigurationProperties) -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-autoconfigure</artifactId>
+			<version>2.7.18</version>
+			<optional>true</optional>
+		</dependency>
+
+		<!-- Spring Boot Configuration Processor (for IDE auto-completion) -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-configuration-processor</artifactId>
+			<version>2.7.18</version>
+			<optional>true</optional>
+		</dependency>
+
 		<!-- Spring Test (for testing) -->
 		<dependency>
 			<groupId>org.springframework</groupId>
 			<artifactId>spring-test</artifactId>
 			<version>${org.springframework-version}</version>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Spring Boot Test (for ApplicationContextRunner) -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-test</artifactId>
+			<version>2.7.18</version>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- AssertJ (for Spring Boot Test ApplicationContextRunner) -->
+		<dependency>
+			<groupId>org.assertj</groupId>
+			<artifactId>assertj-core</artifactId>
+			<version>3.24.2</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
