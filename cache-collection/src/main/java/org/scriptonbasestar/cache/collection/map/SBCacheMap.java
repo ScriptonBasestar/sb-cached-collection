@@ -1,9 +1,12 @@
 package org.scriptonbasestar.cache.collection.map;
 
+import org.scriptonbasestar.cache.collection.eviction.*;
 import org.scriptonbasestar.cache.collection.jmx.CacheStatistics;
 import org.scriptonbasestar.cache.collection.jmx.JmxHelper;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
+import org.scriptonbasestar.cache.core.strategy.EvictionPolicy;
+import org.scriptonbasestar.cache.core.strategy.EvictionStrategy;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
 import org.scriptonbasestar.cache.core.strategy.RefreshStrategy;
 import org.scriptonbasestar.cache.core.strategy.WriteStrategy;
@@ -80,13 +83,38 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final double refreshAheadFactor;  // Refresh-Ahead 시작 시점 (0.0~1.0, 예: 0.8 = TTL의 80%)
 	private final ExecutorService refreshAheadExecutor;  // Refresh-Ahead용 executor
 	private final ConcurrentHashMap<K, Long> creationTimes;  // 항목 생성 시간 (Refresh-Ahead 계산용)
+	private final EvictionPolicy evictionPolicy;  // 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
+	private final EvictionStrategy<K> evictionStrategy;  // 축출 전략 인스턴스
 	private volatile CacheStatistics jmxMBean;  // JMX MBean (null이면 비활성화)
 	private volatile String jmxCacheName;  // JMX 캐시 이름
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
 		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC,
 			WriteStrategy.READ_ONLY, null, 100, 5,
-			RefreshStrategy.ON_MISS, 0.8);
+			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU);
+	}
+
+	/**
+	 * 테스트용 간단한 생성자 (loader 없음, maxSize와 evictionPolicy만 지정)
+	 *
+	 * @param timeoutSec 타임아웃 시간(초)
+	 * @param maxSize 최대 크기
+	 * @param evictionPolicy 제거 정책
+	 */
+	public SBCacheMap(int timeoutSec, int maxSize, EvictionPolicy evictionPolicy) {
+		this(null, timeoutSec, false, 5, 0, maxSize, false, LoadStrategy.SYNC,
+			WriteStrategy.READ_ONLY, null, 100, 5,
+			RefreshStrategy.ON_MISS, 0.8, evictionPolicy);
+	}
+
+	/**
+	 * 테스트용 간단한 생성자 (loader 없음, maxSize만 지정, evictionPolicy는 기본값 LRU)
+	 *
+	 * @param timeoutSec 타임아웃 시간(초)
+	 * @param maxSize 최대 크기
+	 */
+	public SBCacheMap(int timeoutSec, int maxSize) {
+		this(timeoutSec, maxSize, EvictionPolicy.LRU);
 	}
 
 	/**
@@ -101,7 +129,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
 		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC,
 			WriteStrategy.READ_ONLY, null, 100, 5,
-			RefreshStrategy.ON_MISS, 0.8);
+			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU);
 	}
 
 	/**
@@ -121,13 +149,15 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param writeBehindIntervalSeconds WRITE_BEHIND 플러시 주기(초)
 	 * @param refreshStrategy 갱신 전략 (ON_MISS, REFRESH_AHEAD)
 	 * @param refreshAheadFactor Refresh-Ahead 시작 시점 (0.0~1.0)
+	 * @param evictionPolicy 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
 	 */
 	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
 					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy,
 					  WriteStrategy writeStrategy, SBCacheMapWriter<K, V> cacheWriter,
 					  int writeBehindBatchSize, int writeBehindIntervalSeconds,
-					  RefreshStrategy refreshStrategy, double refreshAheadFactor) {
+					  RefreshStrategy refreshStrategy, double refreshAheadFactor,
+					  EvictionPolicy evictionPolicy) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
@@ -145,6 +175,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.writeBehindIntervalSeconds = writeBehindIntervalSeconds;
 		this.refreshStrategy = refreshStrategy != null ? refreshStrategy : RefreshStrategy.ON_MISS;
 		this.refreshAheadFactor = Math.max(0.0, Math.min(1.0, refreshAheadFactor));  // Clamp to [0.0, 1.0]
+
+		// 축출 정책 초기화
+		this.evictionPolicy = evictionPolicy != null ? evictionPolicy : EvictionPolicy.LRU;
+		this.evictionStrategy = createEvictionStrategy(this.evictionPolicy);
+
 		this.insertionOrder = maxSize > 0 ? new LinkedHashMap<K, Long>(16, 0.75f, true) {
 			@Override
 			protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
@@ -283,6 +318,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private int writeBehindIntervalSeconds = 5; // WRITE_BEHIND 플러시 주기(초)
 		private RefreshStrategy refreshStrategy = RefreshStrategy.ON_MISS; // 기본값: ON_MISS
 		private double refreshAheadFactor = 0.8; // Refresh-Ahead 시작 시점 (기본값: 80%)
+		private EvictionPolicy evictionPolicy = EvictionPolicy.LRU; // 기본값: LRU
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -440,6 +476,20 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 축출 정책 설정
+		 * <p>
+		 * maxSize > 0일 때만 의미가 있습니다.
+		 * </p>
+		 *
+		 * @param policy 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
+		 * @return Builder
+		 */
+		public Builder<K, V> evictionPolicy(EvictionPolicy policy) {
+			this.evictionPolicy = policy;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
@@ -447,7 +497,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
 				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy,
 				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds,
-				refreshStrategy, refreshAheadFactor);
+				refreshStrategy, refreshAheadFactor, evictionPolicy);
 
 			// JMX 등록
 			if (enableJmx && jmxCacheName != null) {
@@ -499,6 +549,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 		V oldValue = data.put(key, val);
 
+		// Eviction strategy tracking
+		if (evictionStrategy != null) {
+			evictionStrategy.onInsert(key);
+		}
+
 		// Refresh-Ahead: 생성 시간 기록
 		if (refreshStrategy == RefreshStrategy.REFRESH_AHEAD) {
 			creationTimes.put(key, now);
@@ -515,26 +570,31 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * maxSize 초과 시 가장 오래된 항목 제거 (LRU)
 	 */
 	private void evictIfNecessary() {
-		if (data.size() >= maxSize) {
+		if (data.size() >= maxSize && evictionStrategy != null) {
 			synchronized (lruLock) {
-				if (data.size() >= maxSize && insertionOrder != null && !insertionOrder.isEmpty()) {
-					// 가장 오래된 항목 찾기
-					K eldestKey = insertionOrder.keySet().iterator().next();
-					log.trace("Evicting eldest key due to maxSize: {}", eldestKey);
+				if (data.size() >= maxSize) {
+					// 제거 대상 선택 (정책에 따라)
+					K victimKey = evictionStrategy.selectEvictionCandidate();
+					if (victimKey != null) {
+						log.trace("Evicting key due to maxSize (policy={}): {}", evictionPolicy, victimKey);
 
-					// 제거
-					data.remove(eldestKey);
-					timeoutChecker.remove(eldestKey);
-					absoluteExpiry.remove(eldestKey);
-					insertionOrder.remove(eldestKey);
+						// 제거
+						data.remove(victimKey);
+						timeoutChecker.remove(victimKey);
+						absoluteExpiry.remove(victimKey);
+						creationTimes.remove(victimKey);
+						if (insertionOrder != null) {
+							insertionOrder.remove(victimKey);
+						}
 
-					// 메트릭 기록
-					if (metrics != null) {
-						metrics.recordEviction(1);
+						// 메트릭 기록
+						if (metrics != null) {
+							metrics.recordEviction(1);
+						}
+
+						// JMX 업데이트
+						updateJmxSize();
 					}
-
-					// JMX 업데이트
-					updateJmxSize();
 				}
 			}
 		}
@@ -621,6 +681,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 				}
 			}
 
+			// Eviction strategy tracking
+			if (evictionStrategy != null) {
+				evictionStrategy.onAccess(key);
+			}
+
 			// Refresh-Ahead: TTL의 N% 경과 시 백그라운드 갱신
 			if (refreshStrategy == RefreshStrategy.REFRESH_AHEAD) {
 				checkAndRefreshAhead(key);
@@ -635,7 +700,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 
 		// ASYNC 전략: 만료된 데이터가 있으면 즉시 반환 + 백그라운드 갱신
-		if (loadStrategy == LoadStrategy.ASYNC && cachedValue != null) {
+		if (loadStrategy == LoadStrategy.ASYNC && cachedValue != null && cacheLoader != null) {
 			log.trace("ASYNC strategy: returning stale data for key: {} and triggering background refresh", key);
 
 			// 이미 갱신 중이 아닌 경우에만 백그라운드 갱신 시작
@@ -691,6 +756,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			// 접근 기반 TTL 재확인 (timestamp는 만료 시간을 저장)
 			if (cachedValue != null && timestamp != null && System.currentTimeMillis() < timestamp) {
 				return cachedValue;
+			}
+
+			// Loader가 없으면 null 반환
+			if (cacheLoader == null) {
+				return null;
 			}
 
 			// 실제 로드
@@ -771,9 +841,14 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			creationTimes.remove(key);  // Refresh-Ahead 생성 시간 정리
 			V removed = data.remove(key);
 
-			// Delete from data source (WRITE_THROUGH or WRITE_BEHIND)
+			// Eviction strategy tracking
 			@SuppressWarnings("unchecked")
 			K typedKey = (K) key;
+			if (evictionStrategy != null) {
+				evictionStrategy.onRemove(typedKey);
+			}
+
+			// Delete from data source (WRITE_THROUGH or WRITE_BEHIND)
 			performDelete(typedKey);
 
 			updateJmxSize();
@@ -788,6 +863,13 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		synchronized (lock) {
 			timeoutChecker.clear();
 			absoluteExpiry.clear();
+			creationTimes.clear();
+			if (insertionOrder != null) {
+				insertionOrder.clear();
+			}
+			if (evictionStrategy != null) {
+				evictionStrategy.clear();
+			}
 			data.clear();
 			updateJmxSize();
 		}
@@ -1262,6 +1344,33 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 		V getValue() {
 			return value;
+		}
+	}
+
+	/**
+	 * Create EvictionStrategy instance based on policy.
+	 *
+	 * @param policy the eviction policy
+	 * @return EvictionStrategy instance, or null if maxSize is 0 (unlimited)
+	 */
+	private EvictionStrategy<K> createEvictionStrategy(EvictionPolicy policy) {
+		if (maxSize <= 0) {
+			return null;  // No eviction needed for unlimited cache
+		}
+
+		switch (policy) {
+			case LRU:
+				return new LruEvictionStrategy<>();
+			case LFU:
+				return new LfuEvictionStrategy<>();
+			case FIFO:
+				return new FifoEvictionStrategy<>();
+			case RANDOM:
+				return new RandomEvictionStrategy<>();
+			case TTL:
+				return new TtlEvictionStrategy<>();
+			default:
+				throw new IllegalArgumentException("Unknown eviction policy: " + policy);
 		}
 	}
 }
