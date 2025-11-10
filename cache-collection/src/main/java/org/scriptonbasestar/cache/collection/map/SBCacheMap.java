@@ -1,5 +1,7 @@
 package org.scriptonbasestar.cache.collection.map;
 
+import org.scriptonbasestar.cache.collection.jmx.CacheStatistics;
+import org.scriptonbasestar.cache.collection.jmx.JmxHelper;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
@@ -65,6 +67,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final int maxSize;  // 최대 캐시 크기 (0이면 무제한)
 	private final CacheMetrics metrics;  // 통계 (null이면 비활성화)
 	private final LoadStrategy loadStrategy;  // 로드 전략 (SYNC 또는 ASYNC)
+	private volatile CacheStatistics jmxMBean;  // JMX MBean (null이면 비활성화)
+	private volatile String jmxCacheName;  // JMX 캐시 이름
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
 		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC);
@@ -209,6 +213,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private int maxSize = 0; // 기본값: 무제한
 		private boolean enableMetrics = false; // 기본값: 비활성화
 		private LoadStrategy loadStrategy = LoadStrategy.SYNC; // 기본값: 동기
+		private boolean enableJmx = false; // 기본값: 비활성화
+		private String jmxCacheName = null; // JMX 캐시 이름
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -280,12 +286,36 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * JMX 모니터링을 활성화합니다.
+		 * <p>
+		 * JMX를 통해 JConsole/VisualVM에서 캐시 통계를 실시간으로 모니터링할 수 있습니다.
+		 * enableMetrics()도 자동으로 활성화됩니다.
+		 * </p>
+		 *
+		 * @param cacheName JMX ObjectName에 사용될 캐시 이름
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> enableJmx(String cacheName) {
+			this.enableJmx = true;
+			this.jmxCacheName = cacheName;
+			this.enableMetrics = true; // JMX는 메트릭 필요
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
-			return new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
+			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
 				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy);
+
+			// JMX 등록
+			if (enableJmx && jmxCacheName != null) {
+				cache.registerJmx(jmxCacheName);
+			}
+
+			return cache;
 		}
 	}
 
@@ -328,7 +358,9 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			}
 		}
 
-		return data.put(key, val);
+		V oldValue = data.put(key, val);
+		updateJmxSize();
+		return oldValue;
 	}
 
 	/**
@@ -352,6 +384,9 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					if (metrics != null) {
 						metrics.recordEviction(1);
 					}
+
+					// JMX 업데이트
+					updateJmxSize();
 				}
 			}
 		}
@@ -579,7 +614,9 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		synchronized (lock) {
 			timeoutChecker.remove(key);
 			absoluteExpiry.remove(key);
-			return data.remove(key);
+			V removed = data.remove(key);
+			updateJmxSize();
+			return removed;
 		}
 	}
 
@@ -591,6 +628,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			timeoutChecker.clear();
 			absoluteExpiry.clear();
 			data.clear();
+			updateJmxSize();
 		}
 	}
 
@@ -707,6 +745,59 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	}
 
 	/**
+	 * JMX 모니터링을 등록합니다.
+	 * <p>
+	 * 이미 등록된 경우 무시됩니다.
+	 * </p>
+	 *
+	 * @param cacheName JMX ObjectName에 사용될 캐시 이름
+	 */
+	public void registerJmx(String cacheName) {
+		if (metrics == null) {
+			log.warn("Cannot register JMX: metrics is not enabled");
+			return;
+		}
+		if (jmxMBean != null) {
+			log.debug("JMX already registered for cache: {}", cacheName);
+			return;
+		}
+
+		try {
+			this.jmxCacheName = cacheName;
+			this.jmxMBean = JmxHelper.registerCache(metrics, cacheName, maxSize);
+			updateJmxSize();
+			log.info("Registered JMX MBean for cache: {}", cacheName);
+		} catch (Exception e) {
+			log.error("Failed to register JMX MBean for cache: {}", cacheName, e);
+		}
+	}
+
+	/**
+	 * JMX 모니터링을 해제합니다.
+	 */
+	public void unregisterJmx() {
+		if (jmxCacheName != null) {
+			try {
+				JmxHelper.unregisterCache(jmxCacheName);
+				this.jmxMBean = null;
+				this.jmxCacheName = null;
+				log.info("Unregistered JMX MBean for cache: {}", jmxCacheName);
+			} catch (Exception e) {
+				log.error("Failed to unregister JMX MBean", e);
+			}
+		}
+	}
+
+	/**
+	 * JMX MBean의 currentSize를 업데이트합니다.
+	 */
+	private void updateJmxSize() {
+		if (jmxMBean != null) {
+			jmxMBean.updateCurrentSize(data.size());
+		}
+	}
+
+	/**
 	 * 캐시 리소스를 정리합니다.
 	 * 자동 정리가 활성화된 경우 스케줄러를 종료합니다.
 	 * try-with-resources 또는 명시적 close() 호출 시 자동으로 실행됩니다.
@@ -714,6 +805,9 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	@Override
 	public void close() {
 		if (closed.compareAndSet(false, true)) {
+			// JMX 해제
+			unregisterJmx();
+
 			if (cleanupExecutor != null) {
 				log.debug("Shutting down SBCacheMap cleanup executor");
 				cleanupExecutor.shutdown();
