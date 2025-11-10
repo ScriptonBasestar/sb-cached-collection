@@ -5,6 +5,8 @@ import org.scriptonbasestar.cache.collection.jmx.JmxHelper;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.strategy.WriteStrategy;
+import org.scriptonbasestar.cache.core.writer.SBCacheMapWriter;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
 import org.scriptonbasestar.cache.core.util.TimeCheckerUtil;
 import org.slf4j.Logger;
@@ -67,11 +69,18 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final int maxSize;  // 최대 캐시 크기 (0이면 무제한)
 	private final CacheMetrics metrics;  // 통계 (null이면 비활성화)
 	private final LoadStrategy loadStrategy;  // 로드 전략 (SYNC 또는 ASYNC)
+	private final WriteStrategy writeStrategy;  // 쓰기 전략 (READ_ONLY, WRITE_THROUGH, WRITE_BEHIND)
+	private final SBCacheMapWriter<K, V> cacheWriter;  // 데이터 소스 writer (null이면 READ_ONLY)
+	private final BlockingQueue<WriteOperation<K, V>> writeQueue;  // WRITE_BEHIND용 큐
+	private final ExecutorService writeBehindExecutor;  // WRITE_BEHIND용 executor
+	private final int writeBehindBatchSize;  // WRITE_BEHIND 배치 크기
+	private final int writeBehindIntervalSeconds;  // WRITE_BEHIND 플러시 주기(초)
 	private volatile CacheStatistics jmxMBean;  // JMX MBean (null이면 비활성화)
 	private volatile String jmxCacheName;  // JMX 캐시 이름
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
-		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC);
+		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC,
+			WriteStrategy.READ_ONLY, null, 100, 5);
 	}
 
 	/**
@@ -84,7 +93,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 */
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
-		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC);
+		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC,
+			WriteStrategy.READ_ONLY, null, 100, 5);
 	}
 
 	/**
@@ -98,10 +108,16 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param maxSize 최대 캐시 크기 - 0이면 무제한
 	 * @param enableMetrics 통계 수집 활성화 여부
 	 * @param loadStrategy 로드 전략 (SYNC 또는 ASYNC)
+	 * @param writeStrategy 쓰기 전략 (READ_ONLY, WRITE_THROUGH, WRITE_BEHIND)
+	 * @param cacheWriter 데이터 소스 writer
+	 * @param writeBehindBatchSize WRITE_BEHIND 배치 크기
+	 * @param writeBehindIntervalSeconds WRITE_BEHIND 플러시 주기(초)
 	 */
 	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
-					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy) {
+					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy,
+					  WriteStrategy writeStrategy, SBCacheMapWriter<K, V> cacheWriter,
+					  int writeBehindBatchSize, int writeBehindIntervalSeconds) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
@@ -112,6 +128,10 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.maxSize = maxSize;
 		this.metrics = enableMetrics ? new CacheMetrics() : null;
 		this.loadStrategy = loadStrategy != null ? loadStrategy : LoadStrategy.SYNC;
+		this.writeStrategy = writeStrategy != null ? writeStrategy : WriteStrategy.READ_ONLY;
+		this.cacheWriter = cacheWriter;
+		this.writeBehindBatchSize = writeBehindBatchSize;
+		this.writeBehindIntervalSeconds = writeBehindIntervalSeconds;
 		this.insertionOrder = maxSize > 0 ? new LinkedHashMap<K, Long>(16, 0.75f, true) {
 			@Override
 			protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
@@ -147,6 +167,23 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			log.debug("Async load strategy enabled with {} threads", 5);
 		} else {
 			this.asyncExecutor = null;
+		}
+
+		// WRITE_BEHIND용 ExecutorService와 큐 (WRITE_BEHIND일 때만 생성)
+		if (this.writeStrategy == WriteStrategy.WRITE_BEHIND) {
+			this.writeQueue = new LinkedBlockingQueue<>();
+			this.writeBehindExecutor = Executors.newSingleThreadExecutor(r -> {
+				Thread t = new Thread(r, "SBCacheMap-WriteBehind");
+				t.setDaemon(true);
+				return t;
+			});
+			// 주기적으로 큐를 플러시
+			scheduleWriteBehindFlush();
+			log.debug("Write-behind strategy enabled: batchSize={}, interval={}s",
+				writeBehindBatchSize, writeBehindIntervalSeconds);
+		} else {
+			this.writeQueue = null;
+			this.writeBehindExecutor = null;
 		}
 	}
 
@@ -215,6 +252,10 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private LoadStrategy loadStrategy = LoadStrategy.SYNC; // 기본값: 동기
 		private boolean enableJmx = false; // 기본값: 비활성화
 		private String jmxCacheName = null; // JMX 캐시 이름
+		private WriteStrategy writeStrategy = WriteStrategy.READ_ONLY; // 기본값: READ_ONLY
+		private SBCacheMapWriter<K, V> writer = null; // Writer (null이면 READ_ONLY)
+		private int writeBehindBatchSize = 100; // WRITE_BEHIND 배치 크기
+		private int writeBehindIntervalSeconds = 5; // WRITE_BEHIND 플러시 주기(초)
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -303,12 +344,57 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 쓰기 전략을 설정합니다.
+		 *
+		 * @param strategy 쓰기 전략 (READ_ONLY, WRITE_THROUGH, WRITE_BEHIND)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writeStrategy(WriteStrategy strategy) {
+			this.writeStrategy = strategy;
+			return this;
+		}
+
+		/**
+		 * CacheWriter를 설정합니다 (WRITE_THROUGH/WRITE_BEHIND 사용 시 필수).
+		 *
+		 * @param writer 데이터 소스 writer
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writer(SBCacheMapWriter<K, V> writer) {
+			this.writer = writer;
+			return this;
+		}
+
+		/**
+		 * WRITE_BEHIND 배치 크기를 설정합니다.
+		 *
+		 * @param batchSize 배치 크기 (기본값: 100)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writeBehindBatchSize(int batchSize) {
+			this.writeBehindBatchSize = batchSize;
+			return this;
+		}
+
+		/**
+		 * WRITE_BEHIND 플러시 주기를 설정합니다.
+		 *
+		 * @param intervalSeconds 플러시 주기(초, 기본값: 5초)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writeBehindIntervalSeconds(int intervalSeconds) {
+			this.writeBehindIntervalSeconds = intervalSeconds;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
 			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
-				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy);
+				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy,
+				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds);
 
 			// JMX 등록
 			if (enableJmx && jmxCacheName != null) {
@@ -359,6 +445,10 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 
 		V oldValue = data.put(key, val);
+
+		// Write to data source (WRITE_THROUGH or WRITE_BEHIND)
+		performWrite(key, val);
+
 		updateJmxSize();
 		return oldValue;
 	}
@@ -615,6 +705,12 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			timeoutChecker.remove(key);
 			absoluteExpiry.remove(key);
 			V removed = data.remove(key);
+
+			// Delete from data source (WRITE_THROUGH or WRITE_BEHIND)
+			@SuppressWarnings("unchecked")
+			K typedKey = (K) key;
+			performDelete(typedKey);
+
 			updateJmxSize();
 			return removed;
 		}
@@ -797,6 +893,134 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 	}
 
+	// ===== Write Strategy Methods =====
+
+	/**
+	 * WRITE_BEHIND 플러시 스케줄링
+	 */
+	private void scheduleWriteBehindFlush() {
+		writeBehindExecutor.submit(() -> {
+			while (!closed.get()) {
+				try {
+					Thread.sleep(writeBehindIntervalSeconds * 1000L);
+					flushWriteBehindQueue();
+				} catch (InterruptedException e) {
+					log.debug("Write-behind flush interrupted");
+					Thread.currentThread().interrupt();
+					break;
+				}
+			}
+		});
+	}
+
+	/**
+	 * WRITE_BEHIND 큐를 플러시합니다.
+	 */
+	private void flushWriteBehindQueue() {
+		if (writeQueue == null || writeQueue.isEmpty()) {
+			return;
+		}
+
+		List<WriteOperation<K, V>> batch = new ArrayList<>(writeBehindBatchSize);
+		writeQueue.drainTo(batch, writeBehindBatchSize);
+
+		if (batch.isEmpty()) {
+			return;
+		}
+
+		try {
+			// PUT와 DELETE 분리
+			Map<K, V> putMap = new HashMap<>();
+			List<K> deleteKeys = new ArrayList<>();
+
+			for (WriteOperation<K, V> op : batch) {
+				if (op.getType() == WriteOperation.Type.PUT) {
+					putMap.put(op.getKey(), op.getValue());
+				} else {
+					deleteKeys.add(op.getKey());
+				}
+			}
+
+			// 배치 쓰기
+			if (!putMap.isEmpty()) {
+				cacheWriter.writeAll(putMap);
+				log.debug("Write-behind flushed {} PUT operations", putMap.size());
+			}
+
+			if (!deleteKeys.isEmpty()) {
+				cacheWriter.deleteAll(deleteKeys);
+				log.debug("Write-behind flushed {} DELETE operations", deleteKeys.size());
+			}
+
+		} catch (Exception e) {
+			log.error("Failed to flush write-behind queue (batch size: {})", batch.size(), e);
+			// TODO: Retry logic or dead letter queue
+		}
+	}
+
+	/**
+	 * 쓰기 작업을 수행합니다 (WriteStrategy에 따라 동작 다름)
+	 */
+	private void performWrite(K key, V value) {
+		if (writeStrategy == WriteStrategy.READ_ONLY || cacheWriter == null) {
+			return;
+		}
+
+		try {
+			if (writeStrategy == WriteStrategy.WRITE_THROUGH) {
+				// 동기 쓰기
+				cacheWriter.write(key, value);
+			} else if (writeStrategy == WriteStrategy.WRITE_BEHIND) {
+				// 비동기 큐잉
+				if (writeQueue != null) {
+					writeQueue.offer(WriteOperation.put(key, value));
+					// 배치 크기 도달 시 즉시 플러시
+					if (writeQueue.size() >= writeBehindBatchSize) {
+						writeBehindExecutor.submit(this::flushWriteBehindQueue);
+					}
+				}
+			}
+		} catch (Exception e) {
+			if (writeStrategy == WriteStrategy.WRITE_THROUGH) {
+				// WRITE_THROUGH는 예외를 즉시 전파
+				throw new RuntimeException("Write-through failed for key: " + key, e);
+			} else {
+				// WRITE_BEHIND는 로그만
+				log.error("Failed to queue write-behind operation for key: {}", key, e);
+			}
+		}
+	}
+
+	/**
+	 * 삭제 작업을 수행합니다 (WriteStrategy에 따라 동작 다름)
+	 */
+	private void performDelete(K key) {
+		if (writeStrategy == WriteStrategy.READ_ONLY || cacheWriter == null) {
+			return;
+		}
+
+		try {
+			if (writeStrategy == WriteStrategy.WRITE_THROUGH) {
+				// 동기 삭제
+				cacheWriter.delete(key);
+			} else if (writeStrategy == WriteStrategy.WRITE_BEHIND) {
+				// 비동기 큐잉
+				if (writeQueue != null) {
+					writeQueue.offer(WriteOperation.delete(key));
+					if (writeQueue.size() >= writeBehindBatchSize) {
+						writeBehindExecutor.submit(this::flushWriteBehindQueue);
+					}
+				}
+			}
+		} catch (Exception e) {
+			if (writeStrategy == WriteStrategy.WRITE_THROUGH) {
+				throw new RuntimeException("Write-through delete failed for key: " + key, e);
+			} else {
+				log.error("Failed to queue write-behind delete for key: {}", key, e);
+			}
+		}
+	}
+
 	/**
 	 * 캐시 리소스를 정리합니다.
 	 * 자동 정리가 활성화된 경우 스케줄러를 종료합니다.
@@ -836,6 +1060,73 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					Thread.currentThread().interrupt();
 				}
 			}
+		}
+
+		// WRITE_BEHIND executor shutdown and final flush
+		if (writeBehindExecutor != null) {
+			log.debug("Shutting down write-behind executor and flushing queue");
+			// Final flush before shutdown
+			flushWriteBehindQueue();
+
+			// Flush any remaining in writer
+			if (cacheWriter != null) {
+				try {
+					cacheWriter.flush();
+				} catch (Exception e) {
+					log.error("Failed to flush cache writer", e);
+				}
+			}
+
+			writeBehindExecutor.shutdown();
+			try {
+				if (!writeBehindExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+					log.warn("Write-behind executor did not terminate in time, forcing shutdown");
+					writeBehindExecutor.shutdownNow();
+				}
+			} catch (InterruptedException e) {
+				log.warn("Interrupted while waiting for write-behind executor termination", e);
+				writeBehindExecutor.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/**
+	 * Write operation for WRITE_BEHIND queue.
+	 */
+	private static class WriteOperation<K, V> {
+		enum Type {
+			PUT, DELETE
+		}
+
+		private final Type type;
+		private final K key;
+		private final V value;
+
+		private WriteOperation(Type type, K key, V value) {
+			this.type = type;
+			this.key = key;
+			this.value = value;
+		}
+
+		static <K, V> WriteOperation<K, V> put(K key, V value) {
+			return new WriteOperation<>(Type.PUT, key, value);
+		}
+
+		static <K, V> WriteOperation<K, V> delete(K key) {
+			return new WriteOperation<>(Type.DELETE, key, null);
+		}
+
+		Type getType() {
+			return type;
+		}
+
+		K getKey() {
+			return key;
+		}
+
+		V getValue() {
+			return value;
 		}
 	}
 }
