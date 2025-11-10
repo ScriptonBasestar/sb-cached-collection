@@ -11,6 +11,7 @@
 		<module>cache-loader-redis</module>
 		<module>cache-loader-jdbc</module>
 		<module>cache-loader-file</module>
+		<module>cache-metrics</module>
 		<module>cache-spring</module>
 	</modules>
 	<packaging>pom</packaging>

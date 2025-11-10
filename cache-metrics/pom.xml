@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+		 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.scriptonbasestar.cache</groupId>
+		<artifactId>sb-cache-java</artifactId>
+		<version>sb-cache-20251107-1-DEV</version>
+	</parent>
+
+	<artifactId>cache-metrics</artifactId>
+
+	<dependencies>
+		<!-- this project -->
+		<dependency>
+			<groupId>org.scriptonbasestar.cache</groupId>
+			<artifactId>cache-collection</artifactId>
+		</dependency>
+
+		<!-- Micrometer -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-core</artifactId>
+			<version>1.11.5</version>
+		</dependency>
+
+		<!-- Micrometer Prometheus Registry -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+			<version>1.11.5</version>
+		</dependency>
+	</dependencies>
+</project>
