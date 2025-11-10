@@ -5,6 +5,7 @@ import org.scriptonbasestar.cache.collection.jmx.JmxHelper;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.strategy.RefreshStrategy;
 import org.scriptonbasestar.cache.core.strategy.WriteStrategy;
 import org.scriptonbasestar.cache.core.writer.SBCacheMapWriter;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
@@ -75,12 +76,17 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final ExecutorService writeBehindExecutor;  // WRITE_BEHIND용 executor
 	private final int writeBehindBatchSize;  // WRITE_BEHIND 배치 크기
 	private final int writeBehindIntervalSeconds;  // WRITE_BEHIND 플러시 주기(초)
+	private final RefreshStrategy refreshStrategy;  // 갱신 전략 (ON_MISS, REFRESH_AHEAD)
+	private final double refreshAheadFactor;  // Refresh-Ahead 시작 시점 (0.0~1.0, 예: 0.8 = TTL의 80%)
+	private final ExecutorService refreshAheadExecutor;  // Refresh-Ahead용 executor
+	private final ConcurrentHashMap<K, Long> creationTimes;  // 항목 생성 시간 (Refresh-Ahead 계산용)
 	private volatile CacheStatistics jmxMBean;  // JMX MBean (null이면 비활성화)
 	private volatile String jmxCacheName;  // JMX 캐시 이름
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
 		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC,
-			WriteStrategy.READ_ONLY, null, 100, 5);
+			WriteStrategy.READ_ONLY, null, 100, 5,
+			RefreshStrategy.ON_MISS, 0.8);
 	}
 
 	/**
@@ -94,7 +100,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
 		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC,
-			WriteStrategy.READ_ONLY, null, 100, 5);
+			WriteStrategy.READ_ONLY, null, 100, 5,
+			RefreshStrategy.ON_MISS, 0.8);
 	}
 
 	/**
@@ -112,16 +119,20 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param cacheWriter 데이터 소스 writer
 	 * @param writeBehindBatchSize WRITE_BEHIND 배치 크기
 	 * @param writeBehindIntervalSeconds WRITE_BEHIND 플러시 주기(초)
+	 * @param refreshStrategy 갱신 전략 (ON_MISS, REFRESH_AHEAD)
+	 * @param refreshAheadFactor Refresh-Ahead 시작 시점 (0.0~1.0)
 	 */
 	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
 					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy,
 					  WriteStrategy writeStrategy, SBCacheMapWriter<K, V> cacheWriter,
-					  int writeBehindBatchSize, int writeBehindIntervalSeconds) {
+					  int writeBehindBatchSize, int writeBehindIntervalSeconds,
+					  RefreshStrategy refreshStrategy, double refreshAheadFactor) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
 		this.data = new ConcurrentHashMap<>();
 		this.refreshingKeys = ConcurrentHashMap.newKeySet();  // Thread-safe set for tracking background refreshes
+		this.creationTimes = new ConcurrentHashMap<>();  // For Refresh-Ahead calculations
 		this.cacheLoader = cacheLoader;
 		this.timeoutSec = timeoutSec;
 		this.forcedTimeoutSec = forcedTimeoutSec;
@@ -132,6 +143,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.cacheWriter = cacheWriter;
 		this.writeBehindBatchSize = writeBehindBatchSize;
 		this.writeBehindIntervalSeconds = writeBehindIntervalSeconds;
+		this.refreshStrategy = refreshStrategy != null ? refreshStrategy : RefreshStrategy.ON_MISS;
+		this.refreshAheadFactor = Math.max(0.0, Math.min(1.0, refreshAheadFactor));  // Clamp to [0.0, 1.0]
 		this.insertionOrder = maxSize > 0 ? new LinkedHashMap<K, Long>(16, 0.75f, true) {
 			@Override
 			protected boolean removeEldestEntry(Map.Entry<K, Long> eldest) {
@@ -184,6 +197,18 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		} else {
 			this.writeQueue = null;
 			this.writeBehindExecutor = null;
+		}
+
+		// REFRESH_AHEAD용 ExecutorService (REFRESH_AHEAD일 때만 생성)
+		if (this.refreshStrategy == RefreshStrategy.REFRESH_AHEAD) {
+			this.refreshAheadExecutor = Executors.newFixedThreadPool(2, r -> {
+				Thread t = new Thread(r, "SBCacheMap-RefreshAhead");
+				t.setDaemon(true);
+				return t;
+			});
+			log.debug("Refresh-ahead strategy enabled: factor={}",  refreshAheadFactor);
+		} else {
+			this.refreshAheadExecutor = null;
 		}
 	}
 
@@ -256,6 +281,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private SBCacheMapWriter<K, V> writer = null; // Writer (null이면 READ_ONLY)
 		private int writeBehindBatchSize = 100; // WRITE_BEHIND 배치 크기
 		private int writeBehindIntervalSeconds = 5; // WRITE_BEHIND 플러시 주기(초)
+		private RefreshStrategy refreshStrategy = RefreshStrategy.ON_MISS; // 기본값: ON_MISS
+		private double refreshAheadFactor = 0.8; // Refresh-Ahead 시작 시점 (기본값: 80%)
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -388,13 +415,39 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * Refresh 전략을 설정합니다.
+		 *
+		 * @param strategy Refresh 전략 (기본값: ON_MISS)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> refreshStrategy(RefreshStrategy strategy) {
+			this.refreshStrategy = strategy;
+			return this;
+		}
+
+		/**
+		 * Refresh-Ahead 시작 시점을 설정합니다.
+		 * <p>
+		 * TTL의 N% 경과 시 백그라운드 갱신을 시작합니다.
+		 * </p>
+		 *
+		 * @param factor Refresh-Ahead 시작 시점 (0.0~1.0, 기본값: 0.8 = 80%)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> refreshAheadFactor(double factor) {
+			this.refreshAheadFactor = factor;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
 			}
 			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
 				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy,
-				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds);
+				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds,
+				refreshStrategy, refreshAheadFactor);
 
 			// JMX 등록
 			if (enableJmx && jmxCacheName != null) {
@@ -445,6 +498,11 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 
 		V oldValue = data.put(key, val);
+
+		// Refresh-Ahead: 생성 시간 기록
+		if (refreshStrategy == RefreshStrategy.REFRESH_AHEAD) {
+			creationTimes.put(key, now);
+		}
 
 		// Write to data source (WRITE_THROUGH or WRITE_BEHIND)
 		performWrite(key, val);
@@ -562,6 +620,12 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					insertionOrder.put(key, System.currentTimeMillis());
 				}
 			}
+
+			// Refresh-Ahead: TTL의 N% 경과 시 백그라운드 갱신
+			if (refreshStrategy == RefreshStrategy.REFRESH_AHEAD) {
+				checkAndRefreshAhead(key);
+			}
+
 			return cachedValue;
 		}
 
@@ -704,6 +768,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		synchronized (lock) {
 			timeoutChecker.remove(key);
 			absoluteExpiry.remove(key);
+			creationTimes.remove(key);  // Refresh-Ahead 생성 시간 정리
 			V removed = data.remove(key);
 
 			// Delete from data source (WRITE_THROUGH or WRITE_BEHIND)
@@ -1022,6 +1087,60 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	}
 
 	/**
+	 * Refresh-Ahead 체크: TTL의 N% 경과 시 백그라운드 갱신 시작
+	 */
+	private void checkAndRefreshAhead(K key) {
+		Long creationTime = creationTimes.get(key);
+		if (creationTime == null) {
+			return;  // 생성 시간을 알 수 없으면 스킵
+		}
+
+		long now = System.currentTimeMillis();
+		long elapsedTime = now - creationTime;
+		long ttlMs = timeoutSec * 1000L;
+		long refreshThreshold = (long) (ttlMs * refreshAheadFactor);
+
+		// TTL의 N% 이상 경과 && 아직 갱신 중이 아닌 경우
+		if (elapsedTime >= refreshThreshold && refreshingKeys.add(key)) {
+			log.trace("Refresh-ahead triggered for key: {} (elapsed={}ms, threshold={}ms)",
+				key, elapsedTime, refreshThreshold);
+
+			// 백그라운드에서 비동기 갱신
+			refreshAheadExecutor.submit(() -> {
+				try {
+					log.debug("Refresh-ahead: refreshing key: {}", key);
+					long loadStartTime = System.nanoTime();
+					V freshValue = cacheLoader.loadOne(key);
+
+					// 갱신 성공: 새로운 값으로 교체
+					put(key, freshValue);
+
+					// 로드 성공 메트릭
+					if (metrics != null) {
+						long loadTime = System.nanoTime() - loadStartTime;
+						metrics.recordLoadSuccess(loadTime);
+					}
+					log.debug("Refresh-ahead completed for key: {}", key);
+				} catch (SBCacheLoadFailException e) {
+					// 갱신 실패: 기존 데이터 유지 (Graceful degradation)
+					log.warn("Refresh-ahead failed for key: {}, keeping stale data", key, e);
+
+					// 로드 실패 메트릭
+					if (metrics != null) {
+						metrics.recordLoadFailure();
+					}
+
+					// 실패 시 생성 시간을 현재 시간으로 업데이트하여 다음 get()에서 재시도
+					creationTimes.put(key, System.currentTimeMillis());
+				} finally {
+					// 갱신 완료 후 키 제거
+					refreshingKeys.remove(key);
+				}
+			});
+		}
+	}
+
+	/**
 	 * 캐시 리소스를 정리합니다.
 	 * 자동 정리가 활성화된 경우 스케줄러를 종료합니다.
 	 * try-with-resources 또는 명시적 close() 호출 시 자동으로 실행됩니다.
@@ -1086,6 +1205,22 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			} catch (InterruptedException e) {
 				log.warn("Interrupted while waiting for write-behind executor termination", e);
 				writeBehindExecutor.shutdownNow();
+				Thread.currentThread().interrupt();
+			}
+		}
+
+		// Refresh-Ahead executor shutdown
+		if (refreshAheadExecutor != null) {
+			log.debug("Shutting down refresh-ahead executor");
+			refreshAheadExecutor.shutdown();
+			try {
+				if (!refreshAheadExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+					log.warn("Refresh-ahead executor did not terminate in time, forcing shutdown");
+					refreshAheadExecutor.shutdownNow();
+				}
+			} catch (InterruptedException e) {
+				log.warn("Interrupted while waiting for refresh-ahead executor termination", e);
+				refreshAheadExecutor.shutdownNow();
 				Thread.currentThread().interrupt();
 			}
 		}
