@@ -1,176 +1,255 @@
 package org.scriptonbasestar.cache.loader.jdbc;
 
-import org.h2.jdbcx.JdbcDataSource;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.scriptonbasestar.cache.collection.map.SBCacheMap;
 import org.scriptonbasestar.cache.core.exception.SBCacheLoadFailException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.embedded.EmbeddedDatabase;
+import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseBuilder;
+import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseType;
 
-import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.Map;
 
-import static org.junit.Assert.*;
-
 /**
- * JdbcMapLoader 테스트
- *
- * @author archmagece
- * @since 2025-01
+ * Tests for JdbcMapLoader with H2 embedded database.
  */
 public class JdbcMapLoaderTest {
 
-	private DataSource dataSource;
-	private JdbcMapLoader<String, String> loader;
+	private EmbeddedDatabase db;
+	private JdbcTemplate jdbcTemplate;
 
 	@Before
-	public void setUp() throws SQLException {
-		// H2 in-memory database 설정
-		JdbcDataSource ds = new JdbcDataSource();
-		ds.setURL("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1");
-		ds.setUser("sa");
-		ds.setPassword("");
-		this.dataSource = ds;
+	public void setUp() {
+		// Create embedded H2 database
+		db = new EmbeddedDatabaseBuilder()
+			.setType(EmbeddedDatabaseType.H2)
+			.addScript("classpath:schema.sql")
+			.addScript("classpath:data.sql")
+			.build();
 
-		// 테이블 생성 및 테스트 데이터 삽입
-		try (Connection conn = dataSource.getConnection();
-			 Statement stmt = conn.createStatement()) {
-
-			stmt.execute("DROP TABLE IF EXISTS cache_data");
-			stmt.execute("CREATE TABLE cache_data (cache_key VARCHAR(255) PRIMARY KEY, cache_value VARCHAR(255))");
-			stmt.execute("INSERT INTO cache_data (cache_key, cache_value) VALUES ('key1', 'value1')");
-			stmt.execute("INSERT INTO cache_data (cache_key, cache_value) VALUES ('key2', 'value2')");
-			stmt.execute("INSERT INTO cache_data (cache_key, cache_value) VALUES ('key3', 'value3')");
-		}
-
-		// 로더 생성
-		loader = new JdbcMapLoader<>(
-			dataSource,
-			"SELECT cache_value FROM cache_data WHERE cache_key = ?",
-			"SELECT cache_key, cache_value FROM cache_data",
-			rs -> rs.getString("cache_key"),
-			rs -> rs.getString("cache_value")
-		);
+		jdbcTemplate = new JdbcTemplate(db);
 	}
 
 	@After
-	public void tearDown() throws SQLException {
-		// 테이블 정리
-		try (Connection conn = dataSource.getConnection();
-			 Statement stmt = conn.createStatement()) {
-			stmt.execute("DROP TABLE IF EXISTS cache_data");
+	public void tearDown() {
+		if (db != null) {
+			db.shutdown();
 		}
 	}
 
-	@Test
-	public void testLoadOne() throws SBCacheLoadFailException {
-		// Given
-		String key = "key1";
+	// ========== Constructor Validation Tests ==========
 
-		// When
-		String value = loader.loadOne(key);
-
-		// Then
-		assertNotNull(value);
-		assertEquals("value1", value);
+	@Test(expected = IllegalArgumentException.class)
+	public void testConstructor_NullJdbcTemplate() {
+		new JdbcMapLoader<>(null, "SELECT * FROM products WHERE id = ?", (rs, rowNum) -> null);
 	}
 
-	@Test
-	public void testLoadOneNonExistentKey() throws SBCacheLoadFailException {
-		// Given
-		String key = "nonexistent";
-
-		// When
-		String value = loader.loadOne(key);
-
-		// Then
-		assertNull("Non-existent key should return null", value);
+	@Test(expected = IllegalArgumentException.class)
+	public void testConstructor_NullLoadOneSql() {
+		new JdbcMapLoader<>(jdbcTemplate, null, (rs, rowNum) -> null);
 	}
 
-	@Test
-	public void testLoadAll() throws SBCacheLoadFailException {
-		// When
-		Map<String, String> allData = loader.loadAll();
-
-		// Then
-		assertNotNull(allData);
-		assertEquals(3, allData.size());
-		assertEquals("value1", allData.get("key1"));
-		assertEquals("value2", allData.get("key2"));
-		assertEquals("value3", allData.get("key3"));
+	@Test(expected = IllegalArgumentException.class)
+	public void testConstructor_EmptyLoadOneSql() {
+		new JdbcMapLoader<>(jdbcTemplate, "  ", (rs, rowNum) -> null);
 	}
+
+	@Test(expected = IllegalArgumentException.class)
+	public void testConstructor_NullRowMapper() {
+		new JdbcMapLoader<Long, Product>(jdbcTemplate, "SELECT * FROM products WHERE id = ?", null);
+	}
+
+	// ========== LoadOne Tests ==========
 
 	@Test
-	public void testWithSBCacheMap() {
-		// Given
-		SBCacheMap<String, String> cache = new SBCacheMap<>(loader, 60);
+	public void testLoadOne_Success() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			this::mapProduct
+		);
 
-		// When
-		String value1 = cache.get("key1");
-		String value2 = cache.get("key2");
+		Product product = loader.loadOne(1L);
 
-		// Then
-		assertNotNull(value1);
-		assertNotNull(value2);
-		assertEquals("value1", value1);
-		assertEquals("value2", value2);
+		Assert.assertNotNull(product);
+		Assert.assertEquals(Long.valueOf(1L), product.getId());
+		Assert.assertEquals("Laptop", product.getName());
+		Assert.assertEquals(1200.00, product.getPrice(), 0.01);
 	}
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testNullDataSource() {
-		new JdbcMapLoader<>(
-			null,
-			"SELECT value FROM table WHERE key = ?",
-			"SELECT key, value FROM table",
-			rs -> rs.getString("key"),
-			rs -> rs.getString("value")
+	@Test(expected = SBCacheLoadFailException.class)
+	public void testLoadOne_NotFound() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			this::mapProduct
 		);
+
+		// Key 999 does not exist
+		loader.loadOne(999L);
 	}
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testNullSelectQuery() {
-		new JdbcMapLoader<>(
-			dataSource,
-			null,
-			"SELECT key, value FROM table",
-			rs -> rs.getString("key"),
-			rs -> rs.getString("value")
+	@Test(expected = SBCacheLoadFailException.class)
+	public void testLoadOne_NullKey() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			this::mapProduct
 		);
+
+		loader.loadOne(null);
 	}
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testEmptySelectQuery() {
-		new JdbcMapLoader<>(
-			dataSource,
-			"",
-			"SELECT key, value FROM table",
-			rs -> rs.getString("key"),
-			rs -> rs.getString("value")
+	@Test(expected = SBCacheLoadFailException.class)
+	public void testLoadOne_InvalidSql() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM non_existent_table WHERE id = ?",
+			this::mapProduct
 		);
+
+		loader.loadOne(1L);
 	}
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testNullKeyMapper() {
-		new JdbcMapLoader<>(
-			dataSource,
-			"SELECT value FROM table WHERE key = ?",
-			"SELECT key, value FROM table",
-			null,
-			rs -> rs.getString("value")
+	// ========== LoadAll Tests ==========
+
+	@Test
+	public void testLoadAll_Success() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			"SELECT * FROM products",
+			this::mapProduct,
+			Product::getId
 		);
+
+		Map<Long, Product> allProducts = loader.loadAll();
+
+		Assert.assertNotNull(allProducts);
+		Assert.assertEquals(3, allProducts.size());
+		Assert.assertTrue(allProducts.containsKey(1L));
+		Assert.assertTrue(allProducts.containsKey(2L));
+		Assert.assertTrue(allProducts.containsKey(3L));
+
+		Product product1 = allProducts.get(1L);
+		Assert.assertEquals("Laptop", product1.getName());
+
+		Product product2 = allProducts.get(2L);
+		Assert.assertEquals("Mouse", product2.getName());
 	}
 
-	@Test(expected = IllegalArgumentException.class)
-	public void testNullValueMapper() {
-		new JdbcMapLoader<>(
-			dataSource,
-			"SELECT value FROM table WHERE key = ?",
-			"SELECT key, value FROM table",
-			rs -> rs.getString("key"),
-			null
+	@Test
+	public void testLoadAll_WithCondition() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			"SELECT * FROM products WHERE price > 100",
+			this::mapProduct,
+			Product::getId
 		);
+
+		Map<Long, Product> expensiveProducts = loader.loadAll();
+
+		Assert.assertNotNull(expensiveProducts);
+		Assert.assertEquals(1, expensiveProducts.size());  // Only Laptop (price > 100)
+		Assert.assertTrue(expensiveProducts.containsKey(1L));  // Laptop: 1200.00
+		Assert.assertFalse(expensiveProducts.containsKey(2L));  // Mouse: 25.99 (< 100)
+		Assert.assertFalse(expensiveProducts.containsKey(3L));  // Keyboard: 89.99 (< 100)
+	}
+
+	@Test
+	public void testLoadAll_NoLoadAllSql() throws SBCacheLoadFailException {
+		// Constructor without loadAllSql
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			this::mapProduct
+		);
+
+		Map<Long, Product> result = loader.loadAll();
+
+		Assert.assertNotNull(result);
+		Assert.assertTrue(result.isEmpty());
+	}
+
+	@Test(expected = SBCacheLoadFailException.class)
+	public void testLoadAll_InvalidSql() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			"SELECT * FROM non_existent_table",
+			this::mapProduct,
+			Product::getId
+		);
+
+		loader.loadAll();
+	}
+
+	// ========== Integration Tests ==========
+
+	@Test
+	public void testIntegration_MultipleLoads() throws SBCacheLoadFailException {
+		JdbcMapLoader<Long, Product> loader = new JdbcMapLoader<>(
+			jdbcTemplate,
+			"SELECT * FROM products WHERE id = ?",
+			"SELECT * FROM products",
+			this::mapProduct,
+			Product::getId
+		);
+
+		// Load individual products
+		Product product1 = loader.loadOne(1L);
+		Product product2 = loader.loadOne(2L);
+
+		Assert.assertEquals("Laptop", product1.getName());
+		Assert.assertEquals("Mouse", product2.getName());
+
+		// Load all
+		Map<Long, Product> allProducts = loader.loadAll();
+		Assert.assertEquals(3, allProducts.size());
+	}
+
+	// ========== Helper Methods ==========
+
+	private Product mapProduct(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+		Product product = new Product();
+		product.setId(rs.getLong("id"));
+		product.setName(rs.getString("name"));
+		product.setPrice(rs.getDouble("price"));
+		return product;
+	}
+
+	// ========== Test Model Class ==========
+
+	public static class Product {
+		private Long id;
+		private String name;
+		private double price;
+
+		public Long getId() {
+			return id;
+		}
+
+		public void setId(Long id) {
+			this.id = id;
+		}
+
+		public String getName() {
+			return name;
+		}
+
+		public void setName(String name) {
+			this.name = name;
+		}
+
+		public double getPrice() {
+			return price;
+		}
+
+		public void setPrice(double price) {
+			this.price = price;
+		}
 	}
 }

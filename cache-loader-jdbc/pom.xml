@@ -2,36 +2,60 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0"
 		 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-	<modelVersion>4.0.0</modelVersion>
-
 	<parent>
 		<groupId>org.scriptonbasestar.cache</groupId>
 		<artifactId>sb-cache-java</artifactId>
 		<version>sb-cache-20251107-1-DEV</version>
 	</parent>
+	<modelVersion>4.0.0</modelVersion>
 
 	<artifactId>cache-loader-jdbc</artifactId>
+	<name>cache-loader-jdbc</name>
+	<description>JDBC-based cache loaders for SB Cache</description>
 
 	<dependencies>
-		<!-- this project -->
+		<!-- cache-core (인터페이스만 의존) -->
 		<dependency>
 			<groupId>org.scriptonbasestar.cache</groupId>
 			<artifactId>cache-core</artifactId>
 		</dependency>
+
+		<!-- Spring JDBC (optional, for JdbcTemplate support) -->
 		<dependency>
-			<groupId>org.scriptonbasestar.cache</groupId>
-			<artifactId>cache-collection</artifactId>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-jdbc</artifactId>
+			<version>${org.springframework-version}</version>
+			<optional>true</optional>
+		</dependency>
+
+		<!-- JPA API (optional, for EntityManager support) -->
+		<dependency>
+			<groupId>javax.persistence</groupId>
+			<artifactId>javax.persistence-api</artifactId>
+			<version>2.2</version>
+			<optional>true</optional>
+		</dependency>
+
+		<!-- Test dependencies -->
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
 			<scope>test</scope>
 		</dependency>
 
-		<!-- JDBC -->
-		<!-- JDBC 드라이버는 사용자가 선택 (compile scope이 아닌 provided/runtime) -->
-
-		<!-- H2 Database (테스트용) -->
+		<!-- H2 Database for testing -->
 		<dependency>
 			<groupId>com.h2database</groupId>
 			<artifactId>h2</artifactId>
-			<version>2.2.224</version>
+			<version>2.1.214</version>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Spring Test -->
+		<dependency>
+			<groupId>org.springframework</groupId>
+			<artifactId>spring-test</artifactId>
+			<version>${org.springframework-version}</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

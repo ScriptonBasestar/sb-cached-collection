@@ -14,6 +14,23 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
+ * Functional interface for mapping a ResultSet row to an object.
+ *
+ * @param <T> the type of the result object
+ */
+@FunctionalInterface
+interface RowMapper<T> {
+	/**
+	 * Map a single row of ResultSet to an object.
+	 *
+	 * @param rs the ResultSet (cursor is already positioned at the row)
+	 * @return the mapped object
+	 * @throws SQLException if SQL error occurs
+	 */
+	T map(ResultSet rs) throws SQLException;
+}
+
+/**
  * JDBC 기반 List 로더
  * SQL 쿼리를 통해 데이터베이스에서 리스트 데이터를 로드합니다.
  *
@@ -49,7 +66,7 @@ public class JdbcListLoader<T> implements SBCacheListLoader<T> {
 
 	private final DataSource dataSource;
 	private final String selectQuery;
-	private final JdbcMapLoader.RowMapper<T> rowMapper;
+	private final RowMapper<T> rowMapper;
 
 	/**
 	 * JDBC List 로더 생성자
@@ -61,7 +78,7 @@ public class JdbcListLoader<T> implements SBCacheListLoader<T> {
 	public JdbcListLoader(
 		DataSource dataSource,
 		String selectQuery,
-		JdbcMapLoader.RowMapper<T> rowMapper
+		RowMapper<T> rowMapper
 	) {
 		if (dataSource == null) {
 			throw new IllegalArgumentException("DataSource must not be null");
