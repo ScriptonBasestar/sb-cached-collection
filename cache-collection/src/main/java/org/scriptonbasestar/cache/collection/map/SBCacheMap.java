@@ -4,10 +4,12 @@ import org.scriptonbasestar.cache.collection.eviction.*;
 import org.scriptonbasestar.cache.collection.jmx.CacheStatistics;
 import org.scriptonbasestar.cache.collection.jmx.JmxHelper;
 import org.scriptonbasestar.cache.collection.metrics.CacheMetrics;
+import org.scriptonbasestar.cache.collection.storage.ReferenceBasedStorage;
 import org.scriptonbasestar.cache.core.loader.SBCacheMapLoader;
 import org.scriptonbasestar.cache.core.strategy.EvictionPolicy;
 import org.scriptonbasestar.cache.core.strategy.EvictionStrategy;
 import org.scriptonbasestar.cache.core.strategy.LoadStrategy;
+import org.scriptonbasestar.cache.core.strategy.ReferenceType;
 import org.scriptonbasestar.cache.core.strategy.RefreshStrategy;
 import org.scriptonbasestar.cache.core.strategy.WriteStrategy;
 import org.scriptonbasestar.cache.core.writer.SBCacheMapWriter;
@@ -59,7 +61,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 	private final ConcurrentHashMap<K, Long> timeoutChecker;  // 마지막 접근 기반 TTL
 	private final ConcurrentHashMap<K, Long> absoluteExpiry;  // 절대 만료 시간 (forced timeout)
-	private final ConcurrentHashMap<K, V> data;
+	private final ReferenceBasedStorage<K, V> data;  // Reference 기반 저장소 (STRONG, SOFT, WEAK 지원)
 	private final LinkedHashMap<K, Long> insertionOrder;  // LRU를 위한 삽입 순서 (maxSize > 0일 때만 사용)
 	private final Set<K> refreshingKeys;  // 현재 백그라운드 갱신 중인 키들 (ASYNC 전용)
 	private final int timeoutSec;
@@ -85,13 +87,14 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final ConcurrentHashMap<K, Long> creationTimes;  // 항목 생성 시간 (Refresh-Ahead 계산용)
 	private final EvictionPolicy evictionPolicy;  // 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
 	private final EvictionStrategy<K> evictionStrategy;  // 축출 전략 인스턴스
+	private final ReferenceType referenceType;  // 참조 타입 (STRONG, SOFT, WEAK)
 	private volatile CacheStatistics jmxMBean;  // JMX MBean (null이면 비활성화)
 	private volatile String jmxCacheName;  // JMX 캐시 이름
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
 		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC,
 			WriteStrategy.READ_ONLY, null, 100, 5,
-			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU);
+			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU, ReferenceType.STRONG);
 	}
 
 	/**
@@ -104,7 +107,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	public SBCacheMap(int timeoutSec, int maxSize, EvictionPolicy evictionPolicy) {
 		this(null, timeoutSec, false, 5, 0, maxSize, false, LoadStrategy.SYNC,
 			WriteStrategy.READ_ONLY, null, 100, 5,
-			RefreshStrategy.ON_MISS, 0.8, evictionPolicy);
+			RefreshStrategy.ON_MISS, 0.8, evictionPolicy, ReferenceType.STRONG);
 	}
 
 	/**
@@ -129,7 +132,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
 		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC,
 			WriteStrategy.READ_ONLY, null, 100, 5,
-			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU);
+			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU, ReferenceType.STRONG);
 	}
 
 	/**
@@ -150,6 +153,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param refreshStrategy 갱신 전략 (ON_MISS, REFRESH_AHEAD)
 	 * @param refreshAheadFactor Refresh-Ahead 시작 시점 (0.0~1.0)
 	 * @param evictionPolicy 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
+	 * @param referenceType 참조 타입 (STRONG, SOFT, WEAK)
 	 */
 	protected SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes,
@@ -157,10 +161,12 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					  WriteStrategy writeStrategy, SBCacheMapWriter<K, V> cacheWriter,
 					  int writeBehindBatchSize, int writeBehindIntervalSeconds,
 					  RefreshStrategy refreshStrategy, double refreshAheadFactor,
-					  EvictionPolicy evictionPolicy) {
+					  EvictionPolicy evictionPolicy, ReferenceType referenceType) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
 		this.absoluteExpiry = new ConcurrentHashMap<>();
-		this.data = new ConcurrentHashMap<>();
+		// 참조 타입 초기화 (STRONG, SOFT, WEAK)
+		this.referenceType = referenceType != null ? referenceType : ReferenceType.STRONG;
+		this.data = new ReferenceBasedStorage<>(this.referenceType);
 		this.refreshingKeys = ConcurrentHashMap.newKeySet();  // Thread-safe set for tracking background refreshes
 		this.creationTimes = new ConcurrentHashMap<>();  // For Refresh-Ahead calculations
 		this.cacheLoader = cacheLoader;
@@ -319,6 +325,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private RefreshStrategy refreshStrategy = RefreshStrategy.ON_MISS; // 기본값: ON_MISS
 		private double refreshAheadFactor = 0.8; // Refresh-Ahead 시작 시점 (기본값: 80%)
 		private EvictionPolicy evictionPolicy = EvictionPolicy.LRU; // 기본값: LRU
+		private ReferenceType referenceType = ReferenceType.STRONG; // 기본값: STRONG
 
 		public Builder<K, V> loader(SBCacheMapLoader<K, V> loader) {
 			this.loader = loader;
@@ -490,6 +497,21 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return this;
 		}
 
+		/**
+		 * 참조 타입을 설정합니다.
+		 *
+		 * <p>STRONG (기본값): 일반 참조, GC가 절대 회수하지 않음</p>
+		 * <p>SOFT: 메모리 부족 시 GC가 회수 (대용량 캐시에 적합)</p>
+		 * <p>WEAK: 다음 GC 사이클에서 회수 (임시 캐시에 적합)</p>
+		 *
+		 * @param type 참조 타입 (STRONG, SOFT, WEAK)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> referenceType(ReferenceType type) {
+			this.referenceType = type;
+			return this;
+		}
+
 		public SBCacheMap<K, V> build() {
 			if (loader == null) {
 				throw new IllegalStateException("loader must be set");
@@ -497,7 +519,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
 				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy,
 				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds,
-				refreshStrategy, refreshAheadFactor, evictionPolicy);
+				refreshStrategy, refreshAheadFactor, evictionPolicy, referenceType);
 
 			// JMX 등록
 			if (enableJmx && jmxCacheName != null) {
@@ -798,7 +820,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @return 캐시에 저장된 모든 키-값 쌍의 수정 불가능한 뷰
 	 */
 	public Map<K, V> getAll() {
-		return Collections.unmodifiableMap(data);
+		return Collections.unmodifiableMap(data.toMap());
 	}
 
 	public void postponeOne(K key) {
@@ -836,14 +858,14 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 	public V remove(Object key) {
 		synchronized (lock) {
+			// Type-safe casting
+			@SuppressWarnings("unchecked")
+			K typedKey = (K) key;
+
 			timeoutChecker.remove(key);
 			absoluteExpiry.remove(key);
 			creationTimes.remove(key);  // Refresh-Ahead 생성 시간 정리
-			V removed = data.remove(key);
-
-			// Eviction strategy tracking
-			@SuppressWarnings("unchecked")
-			K typedKey = (K) key;
+			V removed = data.remove(typedKey);
 			if (evictionStrategy != null) {
 				evictionStrategy.onRemove(typedKey);
 			}

@@ -6,6 +6,7 @@ import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -154,6 +155,39 @@ public class ReferenceBasedStorage<K, V> {
 		// GC에 의해 회수된 항목 정리
 		processQueue();
 		return storage.keySet();
+	}
+
+	/**
+	 * 여러 항목을 한 번에 저장합니다.
+	 *
+	 * @param map 저장할 항목들
+	 */
+	public void putAll(Map<? extends K, ? extends V> map) {
+		if (map == null) {
+			return;
+		}
+		processQueue();
+		for (Map.Entry<? extends K, ? extends V> entry : map.entrySet()) {
+			put(entry.getKey(), entry.getValue());
+		}
+	}
+
+	/**
+	 * 저장소의 내용을 일반 Map으로 변환합니다.
+	 * GC에 의해 회수된 항목은 포함되지 않습니다.
+	 *
+	 * @return 현재 저장소의 스냅샷 Map
+	 */
+	public Map<K, V> toMap() {
+		processQueue();
+		Map<K, V> result = new HashMap<>();
+		for (K key : storage.keySet()) {
+			V value = get(key);
+			if (value != null) {
+				result.put(key, value);
+			}
+		}
+		return result;
 	}
 
 	/**
