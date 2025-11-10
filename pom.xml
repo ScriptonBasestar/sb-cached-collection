@@ -15,7 +15,7 @@
 		<module>cache-spring</module>
 	</modules>
 	<packaging>pom</packaging>
-	<version>sb-cache-20251107-1-DEV</version>
+	<version>0.1.0</version>
 
 	<properties>
 		<java-version>1.8</java-version>
