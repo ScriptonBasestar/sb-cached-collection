@@ -15,6 +15,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.1] - 2025-11-13
+
+### Added
+
+#### Write-Behind Retry Logic
+- **writeBehindMaxRetries**: Configurable maximum retry attempts (default: 3)
+- **writeBehindRetryDelayMs**: Configurable retry delay in milliseconds (default: 1000ms)
+- **executeWithRetry()**: Automatic retry mechanism for failed write operations
+- **WriteBehindOperation**: Functional interface for exception-throwing operations
+- Comprehensive error logging with data loss warnings
+
+#### Documentation
+- **cache-metrics/README.md**: Complete Prometheus/Micrometer integration guide
+  - Quick Start examples
+  - Exported metrics reference
+  - Grafana dashboard queries
+  - Spring Boot integration
+- **cache-loader-jdbc/README.md**: Comprehensive JDBC loader documentation
+  - JdbcMapLoader and JdbcListLoader examples
+  - Write-Through integration
+  - Spring Transaction support
+  - Best practices and performance tips
+
+### Changed
+- Enhanced README.md with Write-Behind retry configuration examples
+- Updated project roadmap with completed Phase markers (Spring, Metrics, Loaders)
+- Improved Builder pattern with retry configuration methods
+
+### Fixed
+- Write-Behind queue flush now includes automatic retry on failure
+- Better error handling in background write operations
+
+### Technical Details
+- All constructors updated to accept retry parameters
+- Builder.build() passes retry configuration to SBCacheMap constructor
+- Test coverage: 241 tests passing (148 collection, 23 metrics, 48 spring, 22 file)
+
+---
+
 ## [0.1.0] - 2025-11-10
 
 ### Initial Release
