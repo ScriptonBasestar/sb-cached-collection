@@ -203,15 +203,19 @@ SBCacheMap<Long, User> writeThrough = SBCacheMap.<Long, User>builder()
 
 writeThrough.put(123L, user);  // 캐시 + DB 동시 쓰기
 
-// WRITE_BEHIND: 비동기 쓰기 (성능 우선)
+// WRITE_BEHIND: 비동기 쓰기 (성능 우선) + 재시도 로직
 SBCacheMap<String, Session> writeBehind = SBCacheMap.<String, Session>builder()
     .loader(sessionLoader)
     .writer(sessionWriter)
     .writeStrategy(WriteStrategy.WRITE_BEHIND)  // 배치 처리
+    .writeBehindBatchSize(100)             // 100개씩 배치
+    .writeBehindIntervalSeconds(5)         // 5초마다 플러시
+    .writeBehindMaxRetries(3)              // 실패 시 최대 3회 재시도
+    .writeBehindRetryDelayMs(1000)         // 재시도 간격 1초
     .build();
 
 writeBehind.put("session1", session);  // 캐시에만 쓰고 즉시 반환
-// 백그라운드에서 나중에 DB 반영
+// 백그라운드에서 나중에 DB 반영 (실패 시 자동 재시도)
 ```
 
 ### 5. RefreshStrategy (갱신 전략)

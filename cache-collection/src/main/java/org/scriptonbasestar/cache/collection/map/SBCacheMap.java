@@ -81,6 +81,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	private final ExecutorService writeBehindExecutor;  // WRITE_BEHIND용 executor
 	private final int writeBehindBatchSize;  // WRITE_BEHIND 배치 크기
 	private final int writeBehindIntervalSeconds;  // WRITE_BEHIND 플러시 주기(초)
+	private final int writeBehindMaxRetries;  // WRITE_BEHIND 최대 재시도 횟수
+	private final int writeBehindRetryDelayMs;  // WRITE_BEHIND 재시도 대기 시간(밀리초)
 	private final RefreshStrategy refreshStrategy;  // 갱신 전략 (ON_MISS, REFRESH_AHEAD)
 	private final double refreshAheadFactor;  // Refresh-Ahead 시작 시점 (0.0~1.0, 예: 0.8 = TTL의 80%)
 	private final ExecutorService refreshAheadExecutor;  // Refresh-Ahead용 executor
@@ -93,7 +95,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec) {
 		this(cacheLoader, timeoutSec, false, 5, 0, 0, false, LoadStrategy.SYNC,
-			WriteStrategy.READ_ONLY, null, 100, 5,
+			WriteStrategy.READ_ONLY, null, 100, 5, 3, 1000,
 			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU, ReferenceType.STRONG);
 	}
 
@@ -106,7 +108,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 */
 	public SBCacheMap(int timeoutSec, int maxSize, EvictionPolicy evictionPolicy) {
 		this(null, timeoutSec, false, 5, 0, maxSize, false, LoadStrategy.SYNC,
-			WriteStrategy.READ_ONLY, null, 100, 5,
+			WriteStrategy.READ_ONLY, null, 100, 5, 3, 1000,
 			RefreshStrategy.ON_MISS, 0.8, evictionPolicy, ReferenceType.STRONG);
 	}
 
@@ -131,7 +133,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	public SBCacheMap(SBCacheMapLoader<K,V> cacheLoader, int timeoutSec,
 					  boolean enableAutoCleanup, int cleanupIntervalMinutes) {
 		this(cacheLoader, timeoutSec, enableAutoCleanup, cleanupIntervalMinutes, 0, 0, false, LoadStrategy.SYNC,
-			WriteStrategy.READ_ONLY, null, 100, 5,
+			WriteStrategy.READ_ONLY, null, 100, 5, 3, 1000,
 			RefreshStrategy.ON_MISS, 0.8, EvictionPolicy.LRU, ReferenceType.STRONG);
 	}
 
@@ -150,6 +152,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 	 * @param cacheWriter 데이터 소스 writer
 	 * @param writeBehindBatchSize WRITE_BEHIND 배치 크기
 	 * @param writeBehindIntervalSeconds WRITE_BEHIND 플러시 주기(초)
+	 * @param writeBehindMaxRetries WRITE_BEHIND 최대 재시도 횟수
+	 * @param writeBehindRetryDelayMs WRITE_BEHIND 재시도 대기 시간(밀리초)
 	 * @param refreshStrategy 갱신 전략 (ON_MISS, REFRESH_AHEAD)
 	 * @param refreshAheadFactor Refresh-Ahead 시작 시점 (0.0~1.0)
 	 * @param evictionPolicy 축출 정책 (LRU, LFU, FIFO, RANDOM, TTL)
@@ -160,6 +164,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 					  int forcedTimeoutSec, int maxSize, boolean enableMetrics, LoadStrategy loadStrategy,
 					  WriteStrategy writeStrategy, SBCacheMapWriter<K, V> cacheWriter,
 					  int writeBehindBatchSize, int writeBehindIntervalSeconds,
+					  int writeBehindMaxRetries, int writeBehindRetryDelayMs,
 					  RefreshStrategy refreshStrategy, double refreshAheadFactor,
 					  EvictionPolicy evictionPolicy, ReferenceType referenceType) {
 		this.timeoutChecker = new ConcurrentHashMap<>();
@@ -179,6 +184,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		this.cacheWriter = cacheWriter;
 		this.writeBehindBatchSize = writeBehindBatchSize;
 		this.writeBehindIntervalSeconds = writeBehindIntervalSeconds;
+		this.writeBehindMaxRetries = Math.max(0, writeBehindMaxRetries);  // 최소 0
+		this.writeBehindRetryDelayMs = Math.max(0, writeBehindRetryDelayMs);  // 최소 0
 		this.refreshStrategy = refreshStrategy != null ? refreshStrategy : RefreshStrategy.ON_MISS;
 		this.refreshAheadFactor = Math.max(0.0, Math.min(1.0, refreshAheadFactor));  // Clamp to [0.0, 1.0]
 
@@ -322,6 +329,8 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		private SBCacheMapWriter<K, V> writer = null; // Writer (null이면 READ_ONLY)
 		private int writeBehindBatchSize = 100; // WRITE_BEHIND 배치 크기
 		private int writeBehindIntervalSeconds = 5; // WRITE_BEHIND 플러시 주기(초)
+		private int writeBehindMaxRetries = 3; // WRITE_BEHIND 최대 재시도 횟수 (기본값: 3)
+		private int writeBehindRetryDelayMs = 1000; // WRITE_BEHIND 재시도 대기 시간(밀리초) (기본값: 1000ms)
 		private RefreshStrategy refreshStrategy = RefreshStrategy.ON_MISS; // 기본값: ON_MISS
 		private double refreshAheadFactor = 0.8; // Refresh-Ahead 시작 시점 (기본값: 80%)
 		private EvictionPolicy evictionPolicy = EvictionPolicy.LRU; // 기본값: LRU
@@ -459,6 +468,28 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 		}
 
 		/**
+		 * Write-behind 실패 시 최대 재시도 횟수를 설정합니다.
+		 *
+		 * @param maxRetries 최대 재시도 횟수 (기본값: 3)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writeBehindMaxRetries(int maxRetries) {
+			this.writeBehindMaxRetries = maxRetries;
+			return this;
+		}
+
+		/**
+		 * Write-behind 재시도 간 대기 시간(밀리초)을 설정합니다.
+		 *
+		 * @param retryDelayMs 재시도 대기 시간(밀리초) (기본값: 1000ms)
+		 * @return Builder 인스턴스
+		 */
+		public Builder<K, V> writeBehindRetryDelayMs(int retryDelayMs) {
+			this.writeBehindRetryDelayMs = retryDelayMs;
+			return this;
+		}
+
+		/**
 		 * Refresh 전략을 설정합니다.
 		 *
 		 * @param strategy Refresh 전략 (기본값: ON_MISS)
@@ -519,6 +550,7 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			SBCacheMap<K, V> cache = new SBCacheMap<>(loader, timeoutSec, enableAutoCleanup,
 				cleanupIntervalMinutes, forcedTimeoutSec, maxSize, enableMetrics, loadStrategy,
 				writeStrategy, writer, writeBehindBatchSize, writeBehindIntervalSeconds,
+				writeBehindMaxRetries, writeBehindRetryDelayMs,
 				refreshStrategy, refreshAheadFactor, evictionPolicy, referenceType);
 
 			// JMX 등록
@@ -1097,34 +1129,86 @@ public class SBCacheMap<K, V> implements AutoCloseable {
 			return;
 		}
 
-		try {
-			// PUT와 DELETE 분리
-			Map<K, V> putMap = new HashMap<>();
-			List<K> deleteKeys = new ArrayList<>();
+		// PUT와 DELETE 분리
+		Map<K, V> putMap = new HashMap<>();
+		List<K> deleteKeys = new ArrayList<>();
 
-			for (WriteOperation<K, V> op : batch) {
-				if (op.getType() == WriteOperation.Type.PUT) {
-					putMap.put(op.getKey(), op.getValue());
-				} else {
-					deleteKeys.add(op.getKey());
-				}
+		for (WriteOperation<K, V> op : batch) {
+			if (op.getType() == WriteOperation.Type.PUT) {
+				putMap.put(op.getKey(), op.getValue());
+			} else {
+				deleteKeys.add(op.getKey());
 			}
+		}
 
-			// 배치 쓰기
-			if (!putMap.isEmpty()) {
+		// 배치 쓰기 (재시도 포함)
+		if (!putMap.isEmpty()) {
+			executeWithRetry(() -> {
 				cacheWriter.writeAll(putMap);
 				log.debug("Write-behind flushed {} PUT operations", putMap.size());
-			}
+			}, "PUT operations", putMap.size());
+		}
 
-			if (!deleteKeys.isEmpty()) {
+		if (!deleteKeys.isEmpty()) {
+			executeWithRetry(() -> {
 				cacheWriter.deleteAll(deleteKeys);
 				log.debug("Write-behind flushed {} DELETE operations", deleteKeys.size());
-			}
-
-		} catch (Exception e) {
-			log.error("Failed to flush write-behind queue (batch size: {})", batch.size(), e);
-			// TODO: Retry logic or dead letter queue
+			}, "DELETE operations", deleteKeys.size());
 		}
+	}
+
+	/**
+	 * Write-behind 작업을 재시도 로직과 함께 실행합니다.
+	 *
+	 * @param operation 실행할 작업 (Exception을 던질 수 있음)
+	 * @param operationType 작업 타입 (로깅용)
+	 * @param operationCount 작업 개수 (로깅용)
+	 */
+	private void executeWithRetry(WriteBehindOperation operation, String operationType, int operationCount) {
+		int attempt = 0;
+		Exception lastException = null;
+
+		while (attempt <= writeBehindMaxRetries) {
+			try {
+				operation.execute();
+				if (attempt > 0) {
+					log.info("Write-behind {} succeeded after {} retries (count: {})",
+						operationType, attempt, operationCount);
+				}
+				return;  // 성공 시 즉시 리턴
+			} catch (Exception e) {
+				lastException = e;
+				attempt++;
+
+				if (attempt <= writeBehindMaxRetries) {
+					log.warn("Write-behind {} failed (attempt {}/{}), retrying in {}ms... (count: {})",
+						operationType, attempt, writeBehindMaxRetries + 1, writeBehindRetryDelayMs, operationCount, e);
+
+					// 재시도 전 대기
+					if (writeBehindRetryDelayMs > 0) {
+						try {
+							Thread.sleep(writeBehindRetryDelayMs);
+						} catch (InterruptedException ie) {
+							Thread.currentThread().interrupt();
+							log.error("Write-behind retry interrupted for {}", operationType);
+							return;
+						}
+					}
+				}
+			}
+		}
+
+		// 모든 재시도 실패
+		log.error("Write-behind {} failed after {} attempts (count: {}). Data may be lost!",
+			operationType, attempt, operationCount, lastException);
+	}
+
+	/**
+	 * Write-behind 작업을 나타내는 함수형 인터페이스 (Exception을 던질 수 있음)
+	 */
+	@FunctionalInterface
+	private interface WriteBehindOperation {
+		void execute() throws Exception;
 	}
 
 	/**
