@@ -3,40 +3,16 @@
 <configuration>
 	<!-- help : http://logback.qos.ch/manual/appenders.html -->
 	<appender name="console" class="ch.qos.logback.core.ConsoleAppender">
+		<immediateFlush>true</immediateFlush>
 		<encoder>
 			<pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36}.%method : %msg%n</pattern>
-			<immediateFlush>true</immediateFlush>
 			<charset>UTF-8</charset>
 		</encoder>
 	</appender>
-	<!-- <appender name="Tofile" class="ch.qos.logback.core.FileAppender">
-		<file>d:/logs/com.buskingplay.domain.log</file>
-		<append>false</append>
-		<encoder>
-			<pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36}.%method : %msg%n</pattern>
-			<immediateFlush>true</immediateFlush>
-			<charset>UTF-8</charset>
-		</encoder>
-	</appender> -->
 
-	<!-- 파일생성 start -->
-	<!-- Disabled for test environment - file logging not needed
-	<appender name="file" class="ch.qos.logback.core.rolling.RollingFileAppender">
-		<rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-			<FileNamePattern>/log/logFile.%d{yyyy-MM-dd}.log</FileNamePattern>
-		</rollingPolicy>
-		<encoder>
-			<pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36}.%method : %msg%n</pattern>
-			<immediateFlush>true</immediateFlush>
-			<charset>UTF-8</charset>
-		</encoder>
-	</appender>
-	-->
-	<!-- 파일생성 end -->
 	<logger name="org.scriptonbasestar.cache" level="DEBUG"/>
 	<root level="INFO"><!-- TRACE, DEBUG, INFO, WARN, ERROR -->
 		<appender-ref ref="console"/>
 	</root>
 
 </configuration>
-

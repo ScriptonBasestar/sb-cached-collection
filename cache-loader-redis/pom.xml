@@ -5,7 +5,7 @@
 	<parent>
 		<groupId>org.scriptonbasestar.cache</groupId>
 		<artifactId>sb-cache-java</artifactId>
-		<version>sb-cache-20251107-1-DEV</version>
+		<version>0.1.0</version>
 	</parent>
 	<modelVersion>4.0.0</modelVersion>
 
